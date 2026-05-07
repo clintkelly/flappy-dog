@@ -15,15 +15,15 @@ WINDOW_TITLE = "Platformer"
 GRAVITY = 0.6
 FLAP_VELOCITY = 10
 
-PIPE_WIDTH = 80
+PIPE_WIDTH = 100
 
 PIPE_SPEED = 4
-PIPE_CENTER_GAP = 200 # TODO: Make this random in a range
+PIPE_CENTER_GAP = 250 # TODO: Make this random in a range
 
 MIN_PIPE_CENTER_GAP_Y = 180
 MAX_PIPE_CENTER_GAP_Y = WINDOW_HEIGHT - 180
 
-PIPE_SPACING = 200 # TODO: Make this random in a range
+PIPE_SPACING = 250 # TODO: Make this random in a range
 
 
 class GameView(arcade.Window):
@@ -80,6 +80,9 @@ class GameView(arcade.Window):
             self.player_sprite.change_y = FLAP_VELOCITY
             arcade.play_sound(self.jump_sound)
 
+        if key == arcade.key.R and self.game_over:
+            self.setup()
+
 
     def on_update(self, delta_time):
         """ Movement and game logic """
@@ -122,6 +125,17 @@ class GameView(arcade.Window):
         pipe.center_y = WINDOW_HEIGHT - (pipe.height // 2)
         return pipe
 
+
+    def make_bottom_pipe(self, gap_center):
+        pipe = arcade.SpriteSolidColor(
+            width=PIPE_WIDTH,
+            height=gap_center - PIPE_CENTER_GAP // 2,
+            color=arcade.color.GREEN,
+        )
+        pipe.center_x = WINDOW_WIDTH + PIPE_WIDTH // 2
+        pipe.center_y = pipe.height // 2
+        return pipe
+
     def spawn_pipes(self):
         if not self.should_generate_new_pipe():
             return
@@ -130,10 +144,10 @@ class GameView(arcade.Window):
         gap_center = random.randint(MIN_PIPE_CENTER_GAP_Y, MAX_PIPE_CENTER_GAP_Y)
 
         top_pipe = self.make_top_pipe(gap_center)
-        #bottom_pipe = self.make_bottom_pipe(gap_center)
+        bottom_pipe = self.make_bottom_pipe(gap_center)
 
         self.scene.add_sprite("Pipes", top_pipe)
-        #self.scene.add_sprite("Pipes", bottom_pipe)
+        self.scene.add_sprite("Pipes", bottom_pipe)
 
 
 
