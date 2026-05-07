@@ -5,6 +5,7 @@ Very trivial version of flappy bird, starring a dog!
 
 
 import arcade
+import random
 
 # Constants
 WINDOW_WIDTH = 1280
@@ -14,6 +15,15 @@ WINDOW_TITLE = "Platformer"
 GRAVITY = 0.6
 FLAP_VELOCITY = 10
 
+PIPE_WIDTH = 80
+
+PIPE_SPEED = 4
+PIPE_CENTER_GAP = 200 # TODO: Make this random in a range
+
+MIN_PIPE_CENTER_GAP_Y = 180
+MAX_PIPE_CENTER_GAP_Y = WINDOW_HEIGHT - 180
+
+PIPE_SPACING = 200 # TODO: Make this random in a range
 
 
 class GameView(arcade.Window):
@@ -59,6 +69,7 @@ class GameView(arcade.Window):
         self.player_sprite.center_x = 64
         self.player_sprite.center_y = WINDOW_HEIGHT // 2
         self.scene.add_sprite("Player", self.player_sprite)
+        self.scene.add_sprite_list("Pipes")
 
         self.player_sprite.change_y = 0
 
@@ -78,9 +89,59 @@ class GameView(arcade.Window):
         self.player_sprite.change_y -= GRAVITY
         self.player_sprite.center_y += self.player_sprite.change_y
 
+        # Move and remove existing pipes
+        self.move_and_remove_existing_pipes()
+
+
+        # Spawn new pipes
+        self.spawn_pipes()
+
+
+        # Collision detection
+
+
         if self.player_sprite.bottom < 0 or self.player_sprite.top > WINDOW_HEIGHT:
             self.game_over = True
             arcade.play_sound(self.gameover_sound)
+
+
+    def should_generate_new_pipe(self):
+        pipes = self.scene.get_sprite_list("Pipes")
+        if len(pipes) == 0:
+            return True
+        last_pipe = pipes[-1]
+        return last_pipe.center_x < WINDOW_WIDTH - PIPE_SPACING
+
+    def make_top_pipe(self, gap_center):
+        pipe = arcade.SpriteSolidColor(
+            width=PIPE_WIDTH,
+            height=WINDOW_HEIGHT - (gap_center + PIPE_CENTER_GAP // 2),
+            color=arcade.color.GREEN,
+        )
+        pipe.center_x = WINDOW_WIDTH + PIPE_WIDTH // 2
+        pipe.center_y = WINDOW_HEIGHT - (pipe.height // 2)
+        return pipe
+
+    def spawn_pipes(self):
+        if not self.should_generate_new_pipe():
+            return
+
+        # Figure out the center of the gap
+        gap_center = random.randint(MIN_PIPE_CENTER_GAP_Y, MAX_PIPE_CENTER_GAP_Y)
+
+        top_pipe = self.make_top_pipe(gap_center)
+        #bottom_pipe = self.make_bottom_pipe(gap_center)
+
+        self.scene.add_sprite("Pipes", top_pipe)
+        #self.scene.add_sprite("Pipes", bottom_pipe)
+
+
+
+    def move_and_remove_existing_pipes(self):
+        for pipe in self.scene.get_sprite_list("Pipes"):
+            pipe.center_x -= PIPE_SPEED 
+            if pipe.right < 0:
+                pipe.remove_from_sprite_lists()
 
 
     def on_draw(self):
