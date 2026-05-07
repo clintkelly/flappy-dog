@@ -62,6 +62,7 @@ class GameView(arcade.Window):
 
         self.score = 0
         self.score_text = arcade.Text(f"Score: {self.score}", x=10, y=WINDOW_HEIGHT - 20, color=arcade.color.WHITE, font_size=14)
+        self.game_over_text = arcade.Text("GAME OVER", x=WINDOW_WIDTH // 2 - 50, y=WINDOW_HEIGHT - 20, color=arcade.color.RED, font_size=28)
 
         # Create the player sprite
         self.player_sprite = arcade.Sprite(player_texture_right)
@@ -101,11 +102,21 @@ class GameView(arcade.Window):
 
 
         # Collision detection
+        if arcade.check_for_collision_with_list(
+            self.player_sprite, self.scene["Pipes"]
+        ):
 
+            self.game_over()
+            arcade.play_sound(self.gameover_sound)
+            self.reset_score = False
+            self.setup()
 
         if self.player_sprite.bottom < 0 or self.player_sprite.top > WINDOW_HEIGHT:
-            self.game_over = True
-            arcade.play_sound(self.gameover_sound)
+            self.game_over()
+
+    def game_over(self):
+        self.game_over = True
+        arcade.play_sound(self.gameover_sound)
 
 
     def should_generate_new_pipe(self):
@@ -163,6 +174,8 @@ class GameView(arcade.Window):
         self.gui_camera.use()
         self.scene.draw()
         self.score_text.draw()
+        if self.game_over:
+            self.game_over_text.draw()
 
 
 def main():
