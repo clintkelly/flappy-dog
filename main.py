@@ -10,7 +10,7 @@ import random
 # Constants
 WINDOW_WIDTH = 1280
 WINDOW_HEIGHT = 720
-WINDOW_TITLE = "Platformer"
+WINDOW_TITLE = "Flappy Dog"
 
 PLAYER_MIN_X = 64
 PLAYER_MAX_X = WINDOW_WIDTH - 128
@@ -23,12 +23,15 @@ FLAP_VELOCITY = 10
 PIPE_WIDTH = 120
 
 PIPE_SPEED = 3
-PIPE_CENTER_GAP = 300 # TODO: Make this random in a range
+
+MIN_PIPE_CENTER_GAP = 220
+MAX_PIPE_CENTER_GAP = 340
 
 MIN_PIPE_CENTER_GAP_Y = 180
 MAX_PIPE_CENTER_GAP_Y = WINDOW_HEIGHT - 180
 
-PIPE_SPACING = 280 # TODO: Make this random in a range
+MIN_PIPE_SPACING = 240
+MAX_PIPE_SPACING = 360
 
 
 class GameView(arcade.Window):
@@ -68,7 +71,18 @@ class GameView(arcade.Window):
 
         self.score = 0
         self.score_text = arcade.Text(f"Score: {self.score}", x=10, y=WINDOW_HEIGHT - 20, color=arcade.color.WHITE, font_size=14)
-        self.game_over_text = arcade.Text("GAME OVER", x=50, y=WINDOW_HEIGHT // 2, color=arcade.color.RED, font_size=20)
+        self.game_over_text = arcade.Text(
+            "GAME OVER",
+            x=WINDOW_WIDTH // 2,
+            y=WINDOW_HEIGHT // 2,
+            color=arcade.color.RED,
+            font_size=48,
+            anchor_x="center",
+            anchor_y="center",
+            multiline=True,
+            width=WINDOW_WIDTH,
+            align="center",
+        )
 
         # Create the player sprite
         self.player_sprite = arcade.Sprite(player_texture_right)
@@ -76,9 +90,12 @@ class GameView(arcade.Window):
         self.player_sprite.center_y = WINDOW_HEIGHT - 64
         self.scene.add_sprite("Player", self.player_sprite)
         self.scene.add_sprite_list("Pipes")
+        self.scene.add_sprite_list("ScoreZones")
 
         self.player_sprite.change_y = 0
         self.moving_horizontally = False
+
+        self.next_pipe_spacing = random.randint(MIN_PIPE_SPACING, MAX_PIPE_SPACING)
 
 
     def on_key_press(self, key, modifiers):
@@ -96,6 +113,8 @@ class GameView(arcade.Window):
 
         if key == arcade.key.R and self.is_game_over:
             self.setup()
+        elif key == arcade.key.Q and self.is_game_over:
+            self.close()
 
     def on_key_release(self, key, modifiers):
         """ Called when the user releases a key. """
@@ -137,13 +156,15 @@ class GameView(arcade.Window):
         if arcade.check_for_collision_with_list(
             self.player_sprite, self.scene["Pipes"]
         ):
-
             self.game_over()
-            arcade.play_sound(self.gameover_sound)
 
-        if arcade.check_for_collision_with_list(
-            self.player_sprite, self.scene["ScoreZones"]
-        ):
+        score_zone_hits = arcade.check_for_collision_with_list(
+            self.player_sprite,
+            self.scene["ScoreZones"],
+        )
+
+        for score_zone in score_zone_hits:
+            score_zone.remove_from_sprite_lists()
             self.score += 1
             self.score_text.text = f"Score: {self.score}"
 
@@ -152,7 +173,12 @@ class GameView(arcade.Window):
 
     def game_over(self):
         self.is_game_over = True
-        self.game_over_text.text = f"GAME OVER\nFinal Score: {self.score}\nPress R to Restart"
+        self.game_over_text.text = (
+            f"GAME OVER\n"
+            f"Final score: {self.score}\n"
+            f"Press R to restart\n"
+            f"Press Q to quit"
+        )
         arcade.play_sound(self.gameover_sound)
 
 
@@ -161,12 +187,12 @@ class GameView(arcade.Window):
         if len(pipes) == 0:
             return True
         last_pipe = pipes[-1]
-        return last_pipe.center_x < WINDOW_WIDTH - PIPE_SPACING
+        return last_pipe.center_x < WINDOW_WIDTH - self.next_pipe_spacing
 
-    def make_top_pipe(self, gap_center):
+    def make_top_pipe(self, gap_center, gap_size):
         pipe = arcade.SpriteSolidColor(
             width=PIPE_WIDTH,
-            height=WINDOW_HEIGHT - (gap_center + PIPE_CENTER_GAP // 2),
+            height=WINDOW_HEIGHT - (gap_center + gap_size // 2),
             color=arcade.color.GREEN,
         )
         pipe.center_x = WINDOW_WIDTH + PIPE_WIDTH // 2
@@ -174,21 +200,21 @@ class GameView(arcade.Window):
         return pipe
 
 
-    def make_bottom_pipe(self, gap_center):
+    def make_bottom_pipe(self, gap_center, gap_size):
         pipe = arcade.SpriteSolidColor(
             width=PIPE_WIDTH,
-            height=gap_center - PIPE_CENTER_GAP // 2,
+            height=gap_center - gap_size // 2,
             color=arcade.color.GREEN,
         )
         pipe.center_x = WINDOW_WIDTH + PIPE_WIDTH // 2
         pipe.center_y = pipe.height // 2
         return pipe
-    
-    def make_middle_pipe(self, gap_center):
+
+    def make_middle_pipe(self, gap_center, gap_size):
         """ Used only for scoring - invisible pipe in the gap that the player has to pass through """
         pipe = arcade.SpriteSolidColor(
             width=PIPE_WIDTH,
-            height=PIPE_CENTER_GAP,
+            height=gap_size,
             color=arcade.color.RED,
         )
         pipe.center_x = WINDOW_WIDTH + PIPE_WIDTH // 2
@@ -202,24 +228,29 @@ class GameView(arcade.Window):
         if not self.should_generate_new_pipe():
             return
 
-        # Figure out the center of the gap
+        # Pick a fresh gap size and gap center for this pipe
+        gap_size = random.randint(MIN_PIPE_CENTER_GAP, MAX_PIPE_CENTER_GAP)
         gap_center = random.randint(MIN_PIPE_CENTER_GAP_Y, MAX_PIPE_CENTER_GAP_Y)
 
-        top_pipe = self.make_top_pipe(gap_center)
-        bottom_pipe = self.make_bottom_pipe(gap_center)
-        middle_pipe = self.make_middle_pipe(gap_center)
+        top_pipe = self.make_top_pipe(gap_center, gap_size)
+        bottom_pipe = self.make_bottom_pipe(gap_center, gap_size)
+        middle_pipe = self.make_middle_pipe(gap_center, gap_size)
 
         self.scene.add_sprite("Pipes", top_pipe)
         self.scene.add_sprite("Pipes", bottom_pipe)
         self.scene.add_sprite("ScoreZones", middle_pipe)
 
+        # Pick the spacing until the next pipe spawn
+        self.next_pipe_spacing = random.randint(MIN_PIPE_SPACING, MAX_PIPE_SPACING)
+
 
 
     def move_and_remove_existing_pipes(self):
-        for pipe in self.scene.get_sprite_list("Pipes"):
-            pipe.center_x -= PIPE_SPEED 
-            if pipe.right < 0:
-                pipe.remove_from_sprite_lists()
+        for sprite_list_name in ("Pipes", "ScoreZones"):
+            for pipe in self.scene.get_sprite_list(sprite_list_name):
+                pipe.center_x -= PIPE_SPEED 
+                if pipe.right < 0:
+                    pipe.remove_from_sprite_lists()
 
 
     def on_draw(self):
