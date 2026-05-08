@@ -12,18 +12,23 @@ WINDOW_WIDTH = 1280
 WINDOW_HEIGHT = 720
 WINDOW_TITLE = "Platformer"
 
+PLAYER_MIN_X = 64
+PLAYER_MAX_X = WINDOW_WIDTH - 128
+PLAYER_X_SPEED = 5
+PLAYER_X_FRICTION = 0.5
+
 GRAVITY = 0.6
 FLAP_VELOCITY = 10
 
-PIPE_WIDTH = 100
+PIPE_WIDTH = 120
 
-PIPE_SPEED = 4
-PIPE_CENTER_GAP = 250 # TODO: Make this random in a range
+PIPE_SPEED = 3
+PIPE_CENTER_GAP = 300 # TODO: Make this random in a range
 
 MIN_PIPE_CENTER_GAP_Y = 180
 MAX_PIPE_CENTER_GAP_Y = WINDOW_HEIGHT - 180
 
-PIPE_SPACING = 250 # TODO: Make this random in a range
+PIPE_SPACING = 280 # TODO: Make this random in a range
 
 
 class GameView(arcade.Window):
@@ -46,14 +51,15 @@ class GameView(arcade.Window):
         self.gui_camera = None
         self.score = 0
         self.score_text = None
-        self.game_over = False
+        self.is_game_over = False
+        self.moving_horizontally = False
 
 
     def setup(self):
         """ Called whenever the game starts / resets """
         
         self.scene = arcade.Scene()
-        self.game_over = False
+        self.is_game_over = False
 
         player_texture_left = arcade.load_texture(":resources:images/enemies/bee.png")
         player_texture_right = player_texture_left.flip_left_right()
@@ -62,17 +68,17 @@ class GameView(arcade.Window):
 
         self.score = 0
         self.score_text = arcade.Text(f"Score: {self.score}", x=10, y=WINDOW_HEIGHT - 20, color=arcade.color.WHITE, font_size=14)
-        self.game_over_text = arcade.Text("GAME OVER", x=WINDOW_WIDTH // 2 - 50, y=WINDOW_HEIGHT - 20, color=arcade.color.RED, font_size=28)
+        self.game_over_text = arcade.Text("GAME OVER", x=50, y=WINDOW_HEIGHT // 2, color=arcade.color.RED, font_size=20)
 
         # Create the player sprite
         self.player_sprite = arcade.Sprite(player_texture_right)
-        #self.player_sprite.scale_x = abs(self.player_sprite.scale_x)   # face right
         self.player_sprite.center_x = 64
-        self.player_sprite.center_y = WINDOW_HEIGHT // 2
+        self.player_sprite.center_y = WINDOW_HEIGHT - 64
         self.scene.add_sprite("Player", self.player_sprite)
         self.scene.add_sprite_list("Pipes")
 
         self.player_sprite.change_y = 0
+        self.moving_horizontally = False
 
 
     def on_key_press(self, key, modifiers):
@@ -81,25 +87,51 @@ class GameView(arcade.Window):
             self.player_sprite.change_y = FLAP_VELOCITY
             arcade.play_sound(self.jump_sound)
 
-        if key == arcade.key.R and self.game_over:
+        elif key == arcade.key.LEFT or key == arcade.key.A:
+            self.player_sprite.change_x = -PLAYER_X_SPEED
+            self.moving_horizontally = True
+        elif key == arcade.key.RIGHT or key == arcade.key.D:
+            self.player_sprite.change_x = PLAYER_X_SPEED
+            self.moving_horizontally = True
+
+        if key == arcade.key.R and self.is_game_over:
             self.setup()
+
+    def on_key_release(self, key, modifiers):
+        """ Called when the user releases a key. """
+        if key == arcade.key.LEFT or key == arcade.key.A:
+            #self.player_sprite.change_x = 0
+            self.moving_horizontally = False
+        elif key == arcade.key.RIGHT or key == arcade.key.D:
+            #self.player_sprite.change_x = 0
+            self.moving_horizontally = False
 
 
     def on_update(self, delta_time):
         """ Movement and game logic """
-        if self.game_over:
+        if self.is_game_over:
             return
 
         self.player_sprite.change_y -= GRAVITY
         self.player_sprite.center_y += self.player_sprite.change_y
+        self.player_sprite.center_x += self.player_sprite.change_x
+        if self.player_sprite.change_x > 0 and not self.moving_horizontally:
+            self.player_sprite.change_x -= PLAYER_X_FRICTION
+            self.player_sprite.change_x = max(self.player_sprite.change_x, 0)
+        elif self.player_sprite.change_x < 0 and not self.moving_horizontally:
+            self.player_sprite.change_x += PLAYER_X_FRICTION
+            self.player_sprite.change_x = min(self.player_sprite.change_x, 0)
+
+        if self.player_sprite.center_x < PLAYER_MIN_X:
+            self.player_sprite.center_x = PLAYER_MIN_X
+        elif self.player_sprite.center_x > PLAYER_MAX_X:
+            self.player_sprite.center_x = PLAYER_MAX_X
 
         # Move and remove existing pipes
         self.move_and_remove_existing_pipes()
 
-
         # Spawn new pipes
         self.spawn_pipes()
-
 
         # Collision detection
         if arcade.check_for_collision_with_list(
@@ -108,14 +140,13 @@ class GameView(arcade.Window):
 
             self.game_over()
             arcade.play_sound(self.gameover_sound)
-            self.reset_score = False
-            self.setup()
 
         if self.player_sprite.bottom < 0 or self.player_sprite.top > WINDOW_HEIGHT:
             self.game_over()
 
     def game_over(self):
-        self.game_over = True
+        self.is_game_over = True
+        self.game_over_text.text = f"GAME OVER\nFinal Score: {self.score}\nPress R to Restart"
         arcade.play_sound(self.gameover_sound)
 
 
@@ -167,6 +198,8 @@ class GameView(arcade.Window):
             pipe.center_x -= PIPE_SPEED 
             if pipe.right < 0:
                 pipe.remove_from_sprite_lists()
+                self.score += 1
+                self.score_text.text = f"Score: {self.score}"
 
 
     def on_draw(self):
@@ -174,7 +207,7 @@ class GameView(arcade.Window):
         self.gui_camera.use()
         self.scene.draw()
         self.score_text.draw()
-        if self.game_over:
+        if self.is_game_over:
             self.game_over_text.draw()
 
 
