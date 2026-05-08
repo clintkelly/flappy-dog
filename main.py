@@ -305,6 +305,7 @@ class GameView(arcade.View):
 def main():
     """ Main method """
     window = arcade.Window(WINDOW_WIDTH, WINDOW_HEIGHT, WINDOW_TITLE)
+    window.background_color = arcade.color.SKY_BLUE
     window.show_view(TitleView())
     arcade.run()
 
