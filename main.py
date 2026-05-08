@@ -141,6 +141,12 @@ class GameView(arcade.Window):
             self.game_over()
             arcade.play_sound(self.gameover_sound)
 
+        if arcade.check_for_collision_with_list(
+            self.player_sprite, self.scene["ScoreZones"]
+        ):
+            self.score += 1
+            self.score_text.text = f"Score: {self.score}"
+
         if self.player_sprite.bottom < 0 or self.player_sprite.top > WINDOW_HEIGHT:
             self.game_over()
 
@@ -177,6 +183,20 @@ class GameView(arcade.Window):
         pipe.center_x = WINDOW_WIDTH + PIPE_WIDTH // 2
         pipe.center_y = pipe.height // 2
         return pipe
+    
+    def make_middle_pipe(self, gap_center):
+        """ Used only for scoring - invisible pipe in the gap that the player has to pass through """
+        pipe = arcade.SpriteSolidColor(
+            width=PIPE_WIDTH,
+            height=PIPE_CENTER_GAP,
+            color=arcade.color.RED,
+        )
+        pipe.center_x = WINDOW_WIDTH + PIPE_WIDTH // 2
+        pipe.center_y = gap_center
+        pipe.visible = False
+        return pipe
+
+
 
     def spawn_pipes(self):
         if not self.should_generate_new_pipe():
@@ -187,9 +207,11 @@ class GameView(arcade.Window):
 
         top_pipe = self.make_top_pipe(gap_center)
         bottom_pipe = self.make_bottom_pipe(gap_center)
+        middle_pipe = self.make_middle_pipe(gap_center)
 
         self.scene.add_sprite("Pipes", top_pipe)
         self.scene.add_sprite("Pipes", bottom_pipe)
+        self.scene.add_sprite("ScoreZones", middle_pipe)
 
 
 
@@ -198,8 +220,6 @@ class GameView(arcade.Window):
             pipe.center_x -= PIPE_SPEED 
             if pipe.right < 0:
                 pipe.remove_from_sprite_lists()
-                self.score += 1
-                self.score_text.text = f"Score: {self.score}"
 
 
     def on_draw(self):
