@@ -34,14 +34,52 @@ MIN_PIPE_SPACING = 240
 MAX_PIPE_SPACING = 360
 
 
-class GameView(arcade.Window):
+class TitleView(arcade.View):
+    """ Title screen shown at startup and after R from game-over. """
+
+    def __init__(self):
+        super().__init__()
+        self.title_text = arcade.Text(
+            "FLAPPY DOG",
+            x=WINDOW_WIDTH // 2,
+            y=WINDOW_HEIGHT // 2 + 60,
+            color=arcade.color.YELLOW,
+            font_size=72,
+            anchor_x="center",
+            anchor_y="center",
+        )
+        self.prompt_text = arcade.Text(
+            "Press SPACE to start\nPress Q to quit",
+            x=WINDOW_WIDTH // 2,
+            y=WINDOW_HEIGHT // 2 - 60,
+            color=arcade.color.WHITE,
+            font_size=24,
+            anchor_x="center",
+            anchor_y="center",
+            multiline=True,
+            width=WINDOW_WIDTH,
+            align="center",
+        )
+
+    def on_draw(self):
+        self.clear()
+        self.title_text.draw()
+        self.prompt_text.draw()
+
+    def on_key_press(self, key, modifiers):
+        if key == arcade.key.SPACE:
+            self.window.show_view(GameView())
+        elif key == arcade.key.Q:
+            self.window.close()
+
+
+class GameView(arcade.View):
     """
-    Main application code
+    Main gameplay screen.
     """
 
     def __init__(self):
-
-        super().__init__(WINDOW_WIDTH, WINDOW_HEIGHT, WINDOW_TITLE)
+        super().__init__()
 
         # Will eventually have all of the sprites
         self.scene = None
@@ -56,6 +94,8 @@ class GameView(arcade.Window):
         self.score_text = None
         self.is_game_over = False
         self.moving_horizontally = False
+
+        self.setup()
 
 
     def setup(self):
@@ -112,9 +152,9 @@ class GameView(arcade.Window):
             self.moving_horizontally = True
 
         if key == arcade.key.R and self.is_game_over:
-            self.setup()
+            self.window.show_view(TitleView())
         elif key == arcade.key.Q and self.is_game_over:
-            self.close()
+            self.window.close()
 
     def on_key_release(self, key, modifiers):
         """ Called when the user releases a key. """
@@ -176,7 +216,7 @@ class GameView(arcade.Window):
         self.game_over_text.text = (
             f"GAME OVER\n"
             f"Final score: {self.score}\n"
-            f"Press R to restart\n"
+            f"Press R for title\n"
             f"Press Q to quit"
         )
         arcade.play_sound(self.gameover_sound)
@@ -264,8 +304,8 @@ class GameView(arcade.Window):
 
 def main():
     """ Main method """
-    window = GameView()
-    window.setup()
+    window = arcade.Window(WINDOW_WIDTH, WINDOW_HEIGHT, WINDOW_TITLE)
+    window.show_view(TitleView())
     arcade.run()
 
 
