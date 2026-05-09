@@ -43,6 +43,15 @@ COLUMN_TILE_SCALE = 3
 COLUMN_TILE_RENDERED = COLUMN_TILE_SIZE * COLUMN_TILE_SCALE
 COLUMN_TILE_VERTICAL_OVERLAP = 6  # rendered pixels of overlap at tile seams
 
+# Cloud parallax layer
+NUM_CLOUDS = 8
+CLOUD_SPEED = 1.0  # slower than pipes for parallax depth
+CLOUD_ALPHA = 130  # 0..255 — lower = hazier
+CLOUD_MIN_SCALE = 1.5
+CLOUD_MAX_SCALE = 3.0
+CLOUD_Y_MIN = 200
+CLOUD_Y_MAX = WINDOW_HEIGHT - 60
+
 
 class TitleView(arcade.View):
     """ Title screen shown at startup and after R from game-over. """
@@ -119,6 +128,11 @@ class GameView(arcade.View):
             for p in sorted(ASSET_DIR.glob("column_mid_*.png"))
         ]
 
+        self.cloud_textures = [
+            arcade.load_texture(p)
+            for p in sorted(ASSET_DIR.glob("cloud*.png"))
+        ]
+
         # Static sky background. Native 320x180 scaled 4x to fill the 1280x720 window.
         self.sky_sprite = arcade.Sprite(
             arcade.load_texture(ASSET_DIR / "sky.png"),
@@ -165,6 +179,14 @@ class GameView(arcade.View):
             width=WINDOW_WIDTH,
             align="center",
         )
+
+        # Clouds drawn first so they sit behind everything else.
+        self.scene.add_sprite_list("Clouds")
+        for _ in range(NUM_CLOUDS):
+            self.scene.add_sprite(
+                "Clouds",
+                self.make_cloud(random.randint(0, WINDOW_WIDTH)),
+            )
 
         # Create the player sprite
         self.player_sprite = arcade.Sprite(self.player_textures[0], scale=4)
@@ -240,6 +262,9 @@ class GameView(arcade.View):
 
         # Spawn new pipes
         self.spawn_pipes()
+
+        # Drift clouds for parallax
+        self.move_clouds()
 
         # Collision detection
         if arcade.check_for_collision_with_list(
@@ -374,9 +399,30 @@ class GameView(arcade.View):
     def move_and_remove_existing_pipes(self):
         for sprite_list_name in ("Pipes", "ScoreZones"):
             for pipe in self.scene.get_sprite_list(sprite_list_name):
-                pipe.center_x -= PIPE_SPEED 
+                pipe.center_x -= PIPE_SPEED
                 if pipe.right < 0:
                     pipe.remove_from_sprite_lists()
+
+    def make_cloud(self, x):
+        cloud = arcade.Sprite(
+            random.choice(self.cloud_textures),
+            scale=random.uniform(CLOUD_MIN_SCALE, CLOUD_MAX_SCALE),
+        )
+        cloud.center_x = x
+        cloud.center_y = random.randint(CLOUD_Y_MIN, CLOUD_Y_MAX)
+        cloud.alpha = CLOUD_ALPHA
+        return cloud
+
+    def move_clouds(self):
+        """ Scroll clouds left; recycle off-screen clouds back to the right edge. """
+        for cloud in self.scene.get_sprite_list("Clouds"):
+            cloud.center_x -= CLOUD_SPEED
+            if cloud.right < 0:
+                cloud.texture = random.choice(self.cloud_textures)
+                cloud.scale = random.uniform(CLOUD_MIN_SCALE, CLOUD_MAX_SCALE)
+                cloud.center_x = WINDOW_WIDTH + cloud.width // 2
+                cloud.center_y = random.randint(CLOUD_Y_MIN, CLOUD_Y_MAX)
+                cloud.alpha = CLOUD_ALPHA
 
 
     def on_draw(self):
