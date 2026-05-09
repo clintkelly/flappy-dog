@@ -4,6 +4,8 @@ Very trivial version of flappy bird, starring a dog!
 """
 
 
+from pathlib import Path
+
 import arcade
 import random
 
@@ -32,6 +34,9 @@ MAX_PIPE_CENTER_GAP_Y = WINDOW_HEIGHT - 180
 
 MIN_PIPE_SPACING = 240
 MAX_PIPE_SPACING = 360
+
+PLAYER_ANIMATION_FRAME_DURATION = 0.05  # seconds per frame
+PLAYER_ASSET_DIR = Path(__file__).parent / "assets"
 
 
 class TitleView(arcade.View):
@@ -84,10 +89,14 @@ class GameView(arcade.View):
         # Will eventually have all of the sprites
         self.scene = None
 
-        self.player_texture = None
+        self.player_textures = [
+            arcade.load_texture(path)
+            for path in sorted(PLAYER_ASSET_DIR.glob("bird_*.png"))
+        ]
 
         self.jump_sound = arcade.load_sound(":resources:sounds/jump1.wav")
         self.gameover_sound = arcade.load_sound(":resources:sounds/gameover1.wav")
+        self.coin_sound = arcade.load_sound(":resources:sounds/coin1.wav")
 
         self.gui_camera = None
         self.score = 0
@@ -104,8 +113,8 @@ class GameView(arcade.View):
         self.scene = arcade.Scene()
         self.is_game_over = False
 
-        player_texture_left = arcade.load_texture(":resources:images/enemies/bee.png")
-        player_texture_right = player_texture_left.flip_left_right()
+        self.animation_frame = 0
+        self.animation_time = 0.0
 
         self.gui_camera = arcade.Camera2D()
 
@@ -125,7 +134,7 @@ class GameView(arcade.View):
         )
 
         # Create the player sprite
-        self.player_sprite = arcade.Sprite(player_texture_right)
+        self.player_sprite = arcade.Sprite(self.player_textures[0], scale=4)
         self.player_sprite.center_x = 64
         self.player_sprite.center_y = WINDOW_HEIGHT - 64
         self.scene.add_sprite("Player", self.player_sprite)
@@ -174,6 +183,13 @@ class GameView(arcade.View):
         self.player_sprite.change_y -= GRAVITY
         self.player_sprite.center_y += self.player_sprite.change_y
         self.player_sprite.center_x += self.player_sprite.change_x
+
+        # Cycle through the animation frames
+        self.animation_time += delta_time
+        if self.animation_time >= PLAYER_ANIMATION_FRAME_DURATION:
+            self.animation_time -= PLAYER_ANIMATION_FRAME_DURATION
+            self.animation_frame = (self.animation_frame + 1) % len(self.player_textures)
+            self.player_sprite.texture = self.player_textures[self.animation_frame]
         if self.player_sprite.change_x > 0 and not self.moving_horizontally:
             self.player_sprite.change_x -= PLAYER_X_FRICTION
             self.player_sprite.change_x = max(self.player_sprite.change_x, 0)
@@ -207,6 +223,7 @@ class GameView(arcade.View):
             score_zone.remove_from_sprite_lists()
             self.score += 1
             self.score_text.text = f"Score: {self.score}"
+            arcade.play_sound(self.coin_sound)
 
         if self.player_sprite.bottom < 0 or self.player_sprite.top > WINDOW_HEIGHT:
             self.game_over()
