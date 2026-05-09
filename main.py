@@ -35,6 +35,14 @@ MAX_PIPE_CENTER_GAP_Y = WINDOW_HEIGHT - 180
 MIN_PIPE_SPACING = 240
 MAX_PIPE_SPACING = 360
 
+# Difficulty progression. Both the vertical gap and the horizontal spacing
+# shrink toward these ratios as the score climbs to DIFFICULTY_RAMP_SCORE.
+# Lower DIFFICULTY_RAMP_SCORE = harder faster.
+# Lower *_AT_MAX_DIFFICULTY = harder peak (e.g. 0.50 means tightens to 50% of base).
+DIFFICULTY_RAMP_SCORE = 30
+GAP_RATIO_AT_MAX_DIFFICULTY = 0.65
+SPACING_RATIO_AT_MAX_DIFFICULTY = 0.75
+
 PLAYER_ANIMATION_FRAME_DURATION = 0.05  # seconds per frame
 ASSET_DIR = Path(__file__).parent / "assets"
 
@@ -43,14 +51,24 @@ COLUMN_TILE_SCALE = 3
 COLUMN_TILE_RENDERED = COLUMN_TILE_SIZE * COLUMN_TILE_SCALE
 COLUMN_TILE_VERTICAL_OVERLAP = 6  # rendered pixels of overlap at tile seams
 
-# Cloud parallax layer
+# Cloud parallax layer.
+# All four visual properties are interpolated from depth=0 (near) to depth=1 (far).
+# Far clouds drift slowly, are smaller, more transparent, and tinted toward the sky.
 NUM_CLOUDS = 8
-CLOUD_SPEED = 1.0  # slower than pipes for parallax depth
-CLOUD_ALPHA = 130  # 0..255 — lower = hazier
-CLOUD_MIN_SCALE = 1.5
-CLOUD_MAX_SCALE = 3.0
+CLOUD_NEAR_SCALE = 3.0
+CLOUD_FAR_SCALE = 1.5
+CLOUD_NEAR_ALPHA = 200             # near clouds are bold but still slightly hazy
+CLOUD_FAR_ALPHA = 70               # far clouds are very faint
+CLOUD_NEAR_SPEED = 1.6             # near clouds drift faster (still slower than pipes at 3)
+CLOUD_FAR_SPEED = 0.3               # far clouds barely move
+CLOUD_NEAR_TINT = (255, 255, 255)  # pure white
+CLOUD_FAR_TINT = (180, 200, 220)   # shifted toward sky-blue
 CLOUD_Y_MIN = 200
 CLOUD_Y_MAX = WINDOW_HEIGHT - 60
+
+
+def lerp(a, b, t):
+    return a + (b - a) * t
 
 
 class TitleView(arcade.View):
@@ -204,21 +222,24 @@ class GameView(arcade.View):
 
     def on_key_press(self, key, modifiers):
         """ Called whenever a key is pressed. """
+        if self.is_game_over:
+            if key == arcade.key.SPACE:
+                self.window.show_view(GameView())
+            elif key == arcade.key.R:
+                self.window.show_view(TitleView())
+            elif key == arcade.key.Q:
+                self.window.close()
+            return
+
         if key == arcade.key.SPACE:
             self.player_sprite.change_y = FLAP_VELOCITY
             arcade.play_sound(self.jump_sound)
-
         elif key == arcade.key.LEFT or key == arcade.key.A:
             self.player_sprite.change_x = -PLAYER_X_SPEED
             self.moving_horizontally = True
         elif key == arcade.key.RIGHT or key == arcade.key.D:
             self.player_sprite.change_x = PLAYER_X_SPEED
             self.moving_horizontally = True
-
-        if key == arcade.key.R and self.is_game_over:
-            self.window.show_view(TitleView())
-        elif key == arcade.key.Q and self.is_game_over:
-            self.window.close()
 
     def on_key_release(self, key, modifiers):
         """ Called when the user releases a key. """
@@ -291,6 +312,7 @@ class GameView(arcade.View):
         self.game_over_text.text = (
             f"GAME OVER\n"
             f"Final score: {self.score}\n"
+            f"Press SPACE to play again\n"
             f"Press R for title\n"
             f"Press Q to quit"
         )
@@ -374,8 +396,16 @@ class GameView(arcade.View):
         if not self.should_generate_new_pipe():
             return
 
-        # Pick a fresh gap size and gap center for this pipe
-        gap_size = random.randint(MIN_PIPE_CENTER_GAP, MAX_PIPE_CENTER_GAP)
+        # Difficulty factor: 0 at score 0, 1 once score >= DIFFICULTY_RAMP_SCORE.
+        t = min(self.score / DIFFICULTY_RAMP_SCORE, 1.0) if DIFFICULTY_RAMP_SCORE > 0 else 1.0
+        gap_factor = 1.0 + (GAP_RATIO_AT_MAX_DIFFICULTY - 1.0) * t
+        spacing_factor = 1.0 + (SPACING_RATIO_AT_MAX_DIFFICULTY - 1.0) * t
+
+        # Pick a fresh gap size and gap center for this pipe (scaled by difficulty)
+        gap_size = random.randint(
+            int(MIN_PIPE_CENTER_GAP * gap_factor),
+            int(MAX_PIPE_CENTER_GAP * gap_factor),
+        )
         gap_center = random.randint(MIN_PIPE_CENTER_GAP_Y, MAX_PIPE_CENTER_GAP_Y)
         gap_top = gap_center + gap_size // 2
         gap_bottom = gap_center - gap_size // 2
@@ -391,8 +421,11 @@ class GameView(arcade.View):
             self.scene.add_sprite("Pipes", tile)
         self.scene.add_sprite("ScoreZones", middle_pipe)
 
-        # Pick the spacing until the next pipe spawn
-        self.next_pipe_spacing = random.randint(MIN_PIPE_SPACING, MAX_PIPE_SPACING)
+        # Pick the spacing until the next pipe spawn (also scaled by difficulty)
+        self.next_pipe_spacing = random.randint(
+            int(MIN_PIPE_SPACING * spacing_factor),
+            int(MAX_PIPE_SPACING * spacing_factor),
+        )
 
 
 
@@ -403,26 +436,33 @@ class GameView(arcade.View):
                 if pipe.right < 0:
                     pipe.remove_from_sprite_lists()
 
-    def make_cloud(self, x):
-        cloud = arcade.Sprite(
-            random.choice(self.cloud_textures),
-            scale=random.uniform(CLOUD_MIN_SCALE, CLOUD_MAX_SCALE),
-        )
-        cloud.center_x = x
+    def _randomize_cloud(self, cloud):
+        """ Roll a fresh depth and apply all derived visual + speed properties. """
+        depth = random.random()
+        cloud.texture = random.choice(self.cloud_textures)
+        cloud.scale = lerp(CLOUD_NEAR_SCALE, CLOUD_FAR_SCALE, depth)
         cloud.center_y = random.randint(CLOUD_Y_MIN, CLOUD_Y_MAX)
-        cloud.alpha = CLOUD_ALPHA
+        cloud.alpha = int(lerp(CLOUD_NEAR_ALPHA, CLOUD_FAR_ALPHA, depth))
+        cloud.color = (
+            int(lerp(CLOUD_NEAR_TINT[0], CLOUD_FAR_TINT[0], depth)),
+            int(lerp(CLOUD_NEAR_TINT[1], CLOUD_FAR_TINT[1], depth)),
+            int(lerp(CLOUD_NEAR_TINT[2], CLOUD_FAR_TINT[2], depth)),
+        )
+        cloud.change_x = -lerp(CLOUD_NEAR_SPEED, CLOUD_FAR_SPEED, depth)
+
+    def make_cloud(self, x):
+        cloud = arcade.Sprite(self.cloud_textures[0])
+        self._randomize_cloud(cloud)
+        cloud.center_x = x
         return cloud
 
     def move_clouds(self):
-        """ Scroll clouds left; recycle off-screen clouds back to the right edge. """
+        """ Scroll clouds left at their per-cloud speed; recycle off-screen clouds. """
         for cloud in self.scene.get_sprite_list("Clouds"):
-            cloud.center_x -= CLOUD_SPEED
+            cloud.center_x += cloud.change_x
             if cloud.right < 0:
-                cloud.texture = random.choice(self.cloud_textures)
-                cloud.scale = random.uniform(CLOUD_MIN_SCALE, CLOUD_MAX_SCALE)
+                self._randomize_cloud(cloud)
                 cloud.center_x = WINDOW_WIDTH + cloud.width // 2
-                cloud.center_y = random.randint(CLOUD_Y_MIN, CLOUD_Y_MAX)
-                cloud.alpha = CLOUD_ALPHA
 
 
     def on_draw(self):
