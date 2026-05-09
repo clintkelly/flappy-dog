@@ -22,7 +22,11 @@ PLAYER_X_FRICTION = 0.5
 GRAVITY = 0.6
 FLAP_VELOCITY = 10
 
-PIPE_WIDTH = 120
+# Score zone is a thin trip-wire placed just past the right edge of the column.
+# The bird only scores once it has fully cleared the column, and the zone is
+# removed on first hit so the same gap can't be re-scored by reversing.
+SCORE_ZONE_WIDTH = 8
+SCORE_ZONE_X_OFFSET = 144  # column half-width + roughly bird half-width
 
 PIPE_SPEED = 3
 
@@ -57,14 +61,20 @@ COLUMN_TILE_VERTICAL_OVERLAP = 6  # rendered pixels of overlap at tile seams
 NUM_CLOUDS = 8
 CLOUD_NEAR_SCALE = 3.0
 CLOUD_FAR_SCALE = 1.5
-CLOUD_NEAR_ALPHA = 200             # near clouds are bold but still slightly hazy
-CLOUD_FAR_ALPHA = 70               # far clouds are very faint
 CLOUD_NEAR_SPEED = 1.6             # near clouds drift faster (still slower than pipes at 3)
 CLOUD_FAR_SPEED = 0.3               # far clouds barely move
 CLOUD_NEAR_TINT = (255, 255, 255)  # pure white
 CLOUD_FAR_TINT = (180, 200, 220)   # shifted toward sky-blue
 CLOUD_Y_MIN = 200
 CLOUD_Y_MAX = WINDOW_HEIGHT - 60
+
+# Distant mountain layer — slowest scrolling, sits along the haze line at the bottom of the sky.
+NUM_MOUNTAINS = 2
+MOUNTAIN_SCALE = 1.5
+MOUNTAIN_SPEED = 0.2
+# Tuned so the asset's mist sits inside the sky haze (~y < 120) while peaks rise above it.
+MOUNTAIN_Y_MIN = 100
+MOUNTAIN_Y_MAX = 130
 
 
 def lerp(a, b, t):
@@ -151,6 +161,8 @@ class GameView(arcade.View):
             for p in sorted(ASSET_DIR.glob("cloud*.png"))
         ]
 
+        self.mountain_texture = arcade.load_texture(ASSET_DIR / "mountain.png")
+
         # Static sky background. Native 320x180 scaled 4x to fill the 1280x720 window.
         self.sky_sprite = arcade.Sprite(
             arcade.load_texture(ASSET_DIR / "sky.png"),
@@ -184,7 +196,16 @@ class GameView(arcade.View):
         self.gui_camera = arcade.Camera2D()
 
         self.score = 0
+        self.is_paused = False
         self.score_text = arcade.Text(f"Score: {self.score}", x=10, y=WINDOW_HEIGHT - 20, color=arcade.color.WHITE, font_size=14)
+        self.paused_text = arcade.Text(
+            "PAUSED",
+            x=WINDOW_WIDTH - 10,
+            y=WINDOW_HEIGHT - 20,
+            color=arcade.color.YELLOW,
+            font_size=14,
+            anchor_x="right",
+        )
         self.game_over_text = arcade.Text(
             "GAME OVER",
             x=WINDOW_WIDTH // 2,
@@ -198,7 +219,13 @@ class GameView(arcade.View):
             align="center",
         )
 
-        # Clouds drawn first so they sit behind everything else.
+        # Mountains sit furthest back — added first so they draw behind clouds.
+        self.scene.add_sprite_list("Mountains")
+        for i in range(NUM_MOUNTAINS):
+            x = (WINDOW_WIDTH * i) // NUM_MOUNTAINS + random.randint(-150, 150)
+            self.scene.add_sprite("Mountains", self.make_mountain(x))
+
+        # Clouds drawn next so they float in front of the mountains.
         self.scene.add_sprite_list("Clouds")
         for _ in range(NUM_CLOUDS):
             self.scene.add_sprite(
@@ -231,6 +258,15 @@ class GameView(arcade.View):
                 self.window.close()
             return
 
+        if key == arcade.key.P:
+            self.is_paused = not self.is_paused
+            return
+
+        if self.is_paused:
+            if key == arcade.key.SPACE:
+                self.is_paused = False
+            return
+
         if key == arcade.key.SPACE:
             self.player_sprite.change_y = FLAP_VELOCITY
             arcade.play_sound(self.jump_sound)
@@ -253,7 +289,7 @@ class GameView(arcade.View):
 
     def on_update(self, delta_time):
         """ Movement and game logic """
-        if self.is_game_over:
+        if self.is_game_over or self.is_paused:
             return
 
         self.player_sprite.change_y -= GRAVITY
@@ -284,7 +320,8 @@ class GameView(arcade.View):
         # Spawn new pipes
         self.spawn_pipes()
 
-        # Drift clouds for parallax
+        # Drift mountains and clouds for parallax depth
+        self.move_mountains()
         self.move_clouds()
 
         # Collision detection
@@ -379,13 +416,13 @@ class GameView(arcade.View):
         return tiles
 
     def make_middle_pipe(self, center_x, gap_center, gap_size):
-        """ Used only for scoring - invisible pipe in the gap that the player has to pass through """
+        """ Thin invisible trip-wire placed past the right edge of the column. """
         pipe = arcade.SpriteSolidColor(
-            width=PIPE_WIDTH,
+            width=SCORE_ZONE_WIDTH,
             height=gap_size,
             color=arcade.color.RED,
         )
-        pipe.center_x = center_x
+        pipe.center_x = center_x + SCORE_ZONE_X_OFFSET
         pipe.center_y = gap_center
         pipe.visible = False
         return pipe
@@ -436,13 +473,26 @@ class GameView(arcade.View):
                 if pipe.right < 0:
                     pipe.remove_from_sprite_lists()
 
+    def make_mountain(self, x):
+        mountain = arcade.Sprite(self.mountain_texture, scale=MOUNTAIN_SCALE)
+        mountain.center_x = x
+        mountain.center_y = random.randint(MOUNTAIN_Y_MIN, MOUNTAIN_Y_MAX)
+        return mountain
+
+    def move_mountains(self):
+        for mountain in self.scene.get_sprite_list("Mountains"):
+            mountain.center_x -= MOUNTAIN_SPEED
+            if mountain.right < 0:
+                mountain.center_x = WINDOW_WIDTH + mountain.width // 2
+                mountain.center_y = random.randint(MOUNTAIN_Y_MIN, MOUNTAIN_Y_MAX)
+
     def _randomize_cloud(self, cloud):
         """ Roll a fresh depth and apply all derived visual + speed properties. """
         depth = random.random()
+        cloud.depth = depth  # used to sort the sprite list so far clouds draw behind near ones
         cloud.texture = random.choice(self.cloud_textures)
         cloud.scale = lerp(CLOUD_NEAR_SCALE, CLOUD_FAR_SCALE, depth)
         cloud.center_y = random.randint(CLOUD_Y_MIN, CLOUD_Y_MAX)
-        cloud.alpha = int(lerp(CLOUD_NEAR_ALPHA, CLOUD_FAR_ALPHA, depth))
         cloud.color = (
             int(lerp(CLOUD_NEAR_TINT[0], CLOUD_FAR_TINT[0], depth)),
             int(lerp(CLOUD_NEAR_TINT[1], CLOUD_FAR_TINT[1], depth)),
@@ -458,11 +508,16 @@ class GameView(arcade.View):
 
     def move_clouds(self):
         """ Scroll clouds left at their per-cloud speed; recycle off-screen clouds. """
+        recycled = False
         for cloud in self.scene.get_sprite_list("Clouds"):
             cloud.center_x += cloud.change_x
             if cloud.right < 0:
                 self._randomize_cloud(cloud)
                 cloud.center_x = WINDOW_WIDTH + cloud.width // 2
+                recycled = True
+        if recycled:
+            # Far clouds (depth=1) draw first so near clouds (depth=0) sit on top.
+            self.scene.get_sprite_list("Clouds").sort(key=lambda c: c.depth, reverse=True)
 
 
     def on_draw(self):
@@ -471,6 +526,8 @@ class GameView(arcade.View):
         arcade.draw_sprite(self.sky_sprite)
         self.scene.draw()
         self.score_text.draw()
+        if self.is_paused:
+            self.paused_text.draw()
         if self.is_game_over:
             self.game_over_text.draw()
 
