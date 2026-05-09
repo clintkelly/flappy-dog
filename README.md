@@ -22,10 +22,17 @@ uv run python main.py
 
 | Key | Action |
 | --- | --- |
-| `Space` | Flap |
+| `Space` | Flap (also: start game from title, play again on game-over) |
 | `Left` / `A` | Drift left |
 | `Right` / `D` | Drift right |
-| `R` | Return to title (on game-over) |
-| `Q` | Quit (from title or game-over) |
+| `P` | Pause / unpause |
+| `R` | Return to title (game-over only) |
+| `Q` | Quit |
 
-Pass through the gaps between columns to score. Touching a column or flying off the top/bottom of the screen ends the game.
+## How to play
+
+Tap `Space` to flap upward against gravity. Drift through the gaps between stone columns — touching a column or flying off the top or bottom of the screen ends the game. You score one point each time you fully clear a column.
+
+The game ramps in difficulty as your score climbs: column gaps shrink and columns spawn closer together, peaking around 30 points.
+
+Press `P` any time during play to freeze the screen (handy for screenshots) and `Space` or `P` to resume.

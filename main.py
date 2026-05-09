@@ -105,9 +105,18 @@ class TitleView(arcade.View):
         self.prompt_text = arcade.Text(
             "Press SPACE to start  •  Press Q to quit",
             x=WINDOW_WIDTH // 2,
-            y=32,
+            y=64,
             color=arcade.color.YELLOW,
             font_size=22,
+            anchor_x="center",
+            anchor_y="center",
+        )
+        self.controls_text = arcade.Text(
+            "SPACE flap   •   LEFT/RIGHT drift   •   P pause",
+            x=WINDOW_WIDTH // 2,
+            y=28,
+            color=arcade.color.WHITE,
+            font_size=16,
             anchor_x="center",
             anchor_y="center",
         )
@@ -117,6 +126,7 @@ class TitleView(arcade.View):
         arcade.draw_sprite(self.title_image)
         self.title_text.draw()
         self.prompt_text.draw()
+        self.controls_text.draw()
 
     def on_key_press(self, key, modifiers):
         if key == arcade.key.SPACE:
