@@ -36,7 +36,12 @@ MIN_PIPE_SPACING = 240
 MAX_PIPE_SPACING = 360
 
 PLAYER_ANIMATION_FRAME_DURATION = 0.05  # seconds per frame
-PLAYER_ASSET_DIR = Path(__file__).parent / "assets"
+ASSET_DIR = Path(__file__).parent / "assets"
+
+COLUMN_TILE_SIZE = 64  # native pixels per side
+COLUMN_TILE_SCALE = 3
+COLUMN_TILE_RENDERED = COLUMN_TILE_SIZE * COLUMN_TILE_SCALE
+COLUMN_TILE_VERTICAL_OVERLAP = 6  # rendered pixels of overlap at tile seams
 
 
 class TitleView(arcade.View):
@@ -91,7 +96,22 @@ class GameView(arcade.View):
 
         self.player_textures = [
             arcade.load_texture(path)
-            for path in sorted(PLAYER_ASSET_DIR.glob("bird_*.png"))
+            for path in sorted(ASSET_DIR.glob("bird_*.png"))
+        ]
+
+        # Column tiles use detailed hit boxes so collision tracks the visible art,
+        # not the transparent padding around it.
+        self.column_ceiling_cap_textures = [
+            arcade.load_texture(p, hit_box_algorithm=arcade.hitbox.algo_detailed)
+            for p in sorted(ASSET_DIR.glob("column_ceiling_cap_*.png"))
+        ]
+        self.column_floor_cap_textures = [
+            arcade.load_texture(p, hit_box_algorithm=arcade.hitbox.algo_detailed)
+            for p in sorted(ASSET_DIR.glob("column_floor_cap_*.png"))
+        ]
+        self.column_mid_textures = [
+            arcade.load_texture(p, hit_box_algorithm=arcade.hitbox.algo_detailed)
+            for p in sorted(ASSET_DIR.glob("column_mid_*.png"))
         ]
 
         self.jump_sound = arcade.load_sound(":resources:sounds/jump1.wav")
@@ -246,35 +266,66 @@ class GameView(arcade.View):
         last_pipe = pipes[-1]
         return last_pipe.center_x < WINDOW_WIDTH - self.next_pipe_spacing
 
-    def make_top_pipe(self, gap_center, gap_size):
-        pipe = arcade.SpriteSolidColor(
-            width=PIPE_WIDTH,
-            height=WINDOW_HEIGHT - (gap_center + gap_size // 2),
-            color=arcade.color.GREEN,
+    def make_top_column(self, center_x, gap_top):
+        """ Column hanging from the ceiling. Cap sits flush above the gap; mid tiles stack upward. """
+        tiles = []
+
+        cap = arcade.Sprite(
+            random.choice(self.column_ceiling_cap_textures),
+            scale=COLUMN_TILE_SCALE,
         )
-        pipe.center_x = WINDOW_WIDTH + PIPE_WIDTH // 2
-        pipe.center_y = WINDOW_HEIGHT - (pipe.height // 2)
-        return pipe
+        cap.center_x = center_x
+        cap.center_y = gap_top + COLUMN_TILE_RENDERED // 2
+        tiles.append(cap)
 
+        # Stack mid tiles above the cap until the column extends past the top of the screen.
+        # Each tile overlaps the one below by COLUMN_TILE_VERTICAL_OVERLAP to hide art seams.
+        next_bottom = cap.top - COLUMN_TILE_VERTICAL_OVERLAP
+        while next_bottom < WINDOW_HEIGHT:
+            mid = arcade.Sprite(
+                random.choice(self.column_mid_textures),
+                scale=COLUMN_TILE_SCALE,
+            )
+            mid.center_x = center_x
+            mid.center_y = next_bottom + COLUMN_TILE_RENDERED // 2
+            tiles.append(mid)
+            next_bottom = mid.top - COLUMN_TILE_VERTICAL_OVERLAP
 
-    def make_bottom_pipe(self, gap_center, gap_size):
-        pipe = arcade.SpriteSolidColor(
-            width=PIPE_WIDTH,
-            height=gap_center - gap_size // 2,
-            color=arcade.color.GREEN,
+        return tiles
+
+    def make_bottom_column(self, center_x, gap_bottom):
+        """ Column rising from the floor. Cap sits flush below the gap; mid tiles stack downward. """
+        tiles = []
+
+        cap = arcade.Sprite(
+            random.choice(self.column_floor_cap_textures),
+            scale=COLUMN_TILE_SCALE,
         )
-        pipe.center_x = WINDOW_WIDTH + PIPE_WIDTH // 2
-        pipe.center_y = pipe.height // 2
-        return pipe
+        cap.center_x = center_x
+        cap.center_y = gap_bottom - COLUMN_TILE_RENDERED // 2
+        tiles.append(cap)
 
-    def make_middle_pipe(self, gap_center, gap_size):
+        next_top = cap.bottom + COLUMN_TILE_VERTICAL_OVERLAP
+        while next_top > 0:
+            mid = arcade.Sprite(
+                random.choice(self.column_mid_textures),
+                scale=COLUMN_TILE_SCALE,
+            )
+            mid.center_x = center_x
+            mid.center_y = next_top - COLUMN_TILE_RENDERED // 2
+            tiles.append(mid)
+            next_top = mid.bottom + COLUMN_TILE_VERTICAL_OVERLAP
+
+        return tiles
+
+    def make_middle_pipe(self, center_x, gap_center, gap_size):
         """ Used only for scoring - invisible pipe in the gap that the player has to pass through """
         pipe = arcade.SpriteSolidColor(
             width=PIPE_WIDTH,
             height=gap_size,
             color=arcade.color.RED,
         )
-        pipe.center_x = WINDOW_WIDTH + PIPE_WIDTH // 2
+        pipe.center_x = center_x
         pipe.center_y = gap_center
         pipe.visible = False
         return pipe
@@ -288,13 +339,18 @@ class GameView(arcade.View):
         # Pick a fresh gap size and gap center for this pipe
         gap_size = random.randint(MIN_PIPE_CENTER_GAP, MAX_PIPE_CENTER_GAP)
         gap_center = random.randint(MIN_PIPE_CENTER_GAP_Y, MAX_PIPE_CENTER_GAP_Y)
+        gap_top = gap_center + gap_size // 2
+        gap_bottom = gap_center - gap_size // 2
 
-        top_pipe = self.make_top_pipe(gap_center, gap_size)
-        bottom_pipe = self.make_bottom_pipe(gap_center, gap_size)
-        middle_pipe = self.make_middle_pipe(gap_center, gap_size)
+        # Spawn just off the right edge of the screen
+        column_x = WINDOW_WIDTH + COLUMN_TILE_RENDERED // 2
 
-        self.scene.add_sprite("Pipes", top_pipe)
-        self.scene.add_sprite("Pipes", bottom_pipe)
+        top_tiles = self.make_top_column(column_x, gap_top)
+        bottom_tiles = self.make_bottom_column(column_x, gap_bottom)
+        middle_pipe = self.make_middle_pipe(column_x, gap_center, gap_size)
+
+        for tile in top_tiles + bottom_tiles:
+            self.scene.add_sprite("Pipes", tile)
         self.scene.add_sprite("ScoreZones", middle_pipe)
 
         # Pick the spacing until the next pipe spawn
