@@ -1,5 +1,5 @@
 """
-Very trivial version of flappy bird, starring a dog!
+Skywing Ruins — a tiny Flappy-Bird-style game.
 
 """
 
@@ -12,7 +12,7 @@ import random
 # Constants
 WINDOW_WIDTH = 1280
 WINDOW_HEIGHT = 720
-WINDOW_TITLE = "Flappy Dog"
+WINDOW_TITLE = "Skywing Ruins"
 
 PLAYER_MIN_X = 64
 PLAYER_MAX_X = WINDOW_WIDTH - 128
@@ -49,30 +49,35 @@ class TitleView(arcade.View):
 
     def __init__(self):
         super().__init__()
+        self.title_image = arcade.Sprite(
+            arcade.load_texture(ASSET_DIR / "title.png"),
+            scale=3,
+        )
+        self.title_image.center_x = WINDOW_WIDTH // 2
+        self.title_image.center_y = WINDOW_HEIGHT // 2
+
         self.title_text = arcade.Text(
-            "FLAPPY DOG",
+            "SKYWING RUINS",
             x=WINDOW_WIDTH // 2,
-            y=WINDOW_HEIGHT // 2 + 60,
-            color=arcade.color.YELLOW,
-            font_size=72,
+            y=WINDOW_HEIGHT - 32,
+            color=arcade.color.DARK_BLUE,
+            font_size=42,
             anchor_x="center",
             anchor_y="center",
         )
         self.prompt_text = arcade.Text(
-            "Press SPACE to start\nPress Q to quit",
+            "Press SPACE to start  •  Press Q to quit",
             x=WINDOW_WIDTH // 2,
-            y=WINDOW_HEIGHT // 2 - 60,
-            color=arcade.color.WHITE,
-            font_size=24,
+            y=32,
+            color=arcade.color.YELLOW,
+            font_size=22,
             anchor_x="center",
             anchor_y="center",
-            multiline=True,
-            width=WINDOW_WIDTH,
-            align="center",
         )
 
     def on_draw(self):
         self.clear()
+        arcade.draw_sprite(self.title_image)
         self.title_text.draw()
         self.prompt_text.draw()
 
@@ -113,6 +118,14 @@ class GameView(arcade.View):
             arcade.load_texture(p, hit_box_algorithm=arcade.hitbox.algo_detailed)
             for p in sorted(ASSET_DIR.glob("column_mid_*.png"))
         ]
+
+        # Static sky background. Native 320x180 scaled 4x to fill the 1280x720 window.
+        self.sky_sprite = arcade.Sprite(
+            arcade.load_texture(ASSET_DIR / "sky.png"),
+            scale=4,
+        )
+        self.sky_sprite.center_x = WINDOW_WIDTH // 2
+        self.sky_sprite.center_y = WINDOW_HEIGHT // 2
 
         self.jump_sound = arcade.load_sound(":resources:sounds/jump1.wav")
         self.gameover_sound = arcade.load_sound(":resources:sounds/gameover1.wav")
@@ -369,6 +382,7 @@ class GameView(arcade.View):
     def on_draw(self):
         self.clear()
         self.gui_camera.use()
+        arcade.draw_sprite(self.sky_sprite)
         self.scene.draw()
         self.score_text.draw()
         if self.is_game_over:
