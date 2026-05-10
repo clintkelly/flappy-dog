@@ -5,6 +5,7 @@ Skywing Ruins — a tiny Flappy-Bird-style game.
 
 
 from pathlib import Path
+import math
 
 import arcade
 import random
@@ -75,6 +76,16 @@ MOUNTAIN_SPEED = 0.2
 # Tuned so the asset's mist sits inside the sky haze (~y < 120) while peaks rise above it.
 MOUNTAIN_Y_MIN = 100
 MOUNTAIN_Y_MAX = 130
+
+# Oscillating boulder obstacles — sometimes spawned in place of a column pair.
+BOULDER_OBSTACLE_CHANCE = 0.2   # fraction of obstacle spawns that are boulders
+BOULDER_SCALE = 3
+BOULDER_BASE_Y_MIN = 240
+BOULDER_BASE_Y_MAX = WINDOW_HEIGHT - 240
+BOULDER_AMPLITUDE_MIN = 80
+BOULDER_AMPLITUDE_MAX = 160
+BOULDER_PHASE_SPEED_MIN = 1.5   # radians/sec
+BOULDER_PHASE_SPEED_MAX = 2.5
 
 
 def lerp(a, b, t):
@@ -166,6 +177,11 @@ class GameView(arcade.View):
             for p in sorted(ASSET_DIR.glob("column_mid_*.png"))
         ]
 
+        self.boulder_textures = [
+            arcade.load_texture(p, hit_box_algorithm=arcade.hitbox.algo_detailed)
+            for p in sorted(ASSET_DIR.glob("boulder*.png"))
+        ]
+
         self.cloud_textures = [
             arcade.load_texture(p)
             for p in sorted(ASSET_DIR.glob("cloud*.png"))
@@ -249,6 +265,7 @@ class GameView(arcade.View):
         self.player_sprite.center_y = WINDOW_HEIGHT - 64
         self.scene.add_sprite("Player", self.player_sprite)
         self.scene.add_sprite_list("Pipes")
+        self.scene.add_sprite_list("Boulders")
         self.scene.add_sprite_list("ScoreZones")
 
         self.player_sprite.change_y = 0
@@ -326,6 +343,7 @@ class GameView(arcade.View):
 
         # Move and remove existing pipes
         self.move_and_remove_existing_pipes()
+        self.move_boulders(delta_time)
 
         # Spawn new pipes
         self.spawn_pipes()
@@ -334,9 +352,11 @@ class GameView(arcade.View):
         self.move_mountains()
         self.move_clouds()
 
-        # Collision detection
+        # Collision detection — pipes or boulders both kill the bird
         if arcade.check_for_collision_with_list(
             self.player_sprite, self.scene["Pipes"]
+        ) or arcade.check_for_collision_with_list(
+            self.player_sprite, self.scene["Boulders"]
         ):
             self.game_over()
 
@@ -367,11 +387,16 @@ class GameView(arcade.View):
 
 
     def should_generate_new_pipe(self):
-        pipes = self.scene.get_sprite_list("Pipes")
-        if len(pipes) == 0:
+        # Look at the rightmost sprite across pipes AND boulders so spacing is
+        # consistent regardless of which kind was spawned last.
+        last_x = -float("inf")
+        for list_name in ("Pipes", "Boulders"):
+            sprites = self.scene.get_sprite_list(list_name)
+            if sprites:
+                last_x = max(last_x, sprites[-1].center_x)
+        if last_x == -float("inf"):
             return True
-        last_pipe = pipes[-1]
-        return last_pipe.center_x < WINDOW_WIDTH - self.next_pipe_spacing
+        return last_x < WINDOW_WIDTH - self.next_pipe_spacing
 
     def make_top_column(self, center_x, gap_top):
         """ Column hanging from the ceiling. Cap sits flush above the gap; mid tiles stack upward. """
@@ -445,30 +470,45 @@ class GameView(arcade.View):
 
         # Difficulty factor: 0 at score 0, 1 once score >= DIFFICULTY_RAMP_SCORE.
         t = min(self.score / DIFFICULTY_RAMP_SCORE, 1.0) if DIFFICULTY_RAMP_SCORE > 0 else 1.0
-        gap_factor = 1.0 + (GAP_RATIO_AT_MAX_DIFFICULTY - 1.0) * t
         spacing_factor = 1.0 + (SPACING_RATIO_AT_MAX_DIFFICULTY - 1.0) * t
-
-        # Pick a fresh gap size and gap center for this pipe (scaled by difficulty)
-        gap_size = random.randint(
-            int(MIN_PIPE_CENTER_GAP * gap_factor),
-            int(MAX_PIPE_CENTER_GAP * gap_factor),
-        )
-        gap_center = random.randint(MIN_PIPE_CENTER_GAP_Y, MAX_PIPE_CENTER_GAP_Y)
-        gap_top = gap_center + gap_size // 2
-        gap_bottom = gap_center - gap_size // 2
 
         # Spawn just off the right edge of the screen
         column_x = WINDOW_WIDTH + COLUMN_TILE_RENDERED // 2
 
-        top_tiles = self.make_top_column(column_x, gap_top)
-        bottom_tiles = self.make_bottom_column(column_x, gap_bottom)
-        middle_pipe = self.make_middle_pipe(column_x, gap_center, gap_size)
+        if random.random() < BOULDER_OBSTACLE_CHANCE:
+            # Spawn a single oscillating boulder instead of a column pair.
+            self.scene.add_sprite("Boulders", self.make_boulder(column_x))
+            # Boulder score zone spans the full window height — the bird scores by clearing
+            # the boulder horizontally regardless of its y at the moment.
+            score_zone = arcade.SpriteSolidColor(
+                width=SCORE_ZONE_WIDTH,
+                height=WINDOW_HEIGHT,
+                color=arcade.color.RED,
+            )
+            score_zone.center_x = column_x + SCORE_ZONE_X_OFFSET
+            score_zone.center_y = WINDOW_HEIGHT // 2
+            score_zone.visible = False
+            self.scene.add_sprite("ScoreZones", score_zone)
+        else:
+            # Existing column-pair spawn with gap-size difficulty scaling.
+            gap_factor = 1.0 + (GAP_RATIO_AT_MAX_DIFFICULTY - 1.0) * t
+            gap_size = random.randint(
+                int(MIN_PIPE_CENTER_GAP * gap_factor),
+                int(MAX_PIPE_CENTER_GAP * gap_factor),
+            )
+            gap_center = random.randint(MIN_PIPE_CENTER_GAP_Y, MAX_PIPE_CENTER_GAP_Y)
+            gap_top = gap_center + gap_size // 2
+            gap_bottom = gap_center - gap_size // 2
 
-        for tile in top_tiles + bottom_tiles:
-            self.scene.add_sprite("Pipes", tile)
-        self.scene.add_sprite("ScoreZones", middle_pipe)
+            top_tiles = self.make_top_column(column_x, gap_top)
+            bottom_tiles = self.make_bottom_column(column_x, gap_bottom)
+            middle_pipe = self.make_middle_pipe(column_x, gap_center, gap_size)
 
-        # Pick the spacing until the next pipe spawn (also scaled by difficulty)
+            for tile in top_tiles + bottom_tiles:
+                self.scene.add_sprite("Pipes", tile)
+            self.scene.add_sprite("ScoreZones", middle_pipe)
+
+        # Pick the spacing until the next spawn (also scaled by difficulty)
         self.next_pipe_spacing = random.randint(
             int(MIN_PIPE_SPACING * spacing_factor),
             int(MAX_PIPE_SPACING * spacing_factor),
@@ -482,6 +522,27 @@ class GameView(arcade.View):
                 pipe.center_x -= PIPE_SPEED
                 if pipe.right < 0:
                     pipe.remove_from_sprite_lists()
+
+    def make_boulder(self, x):
+        boulder = arcade.Sprite(
+            random.choice(self.boulder_textures),
+            scale=BOULDER_SCALE,
+        )
+        boulder.center_x = x
+        boulder.base_y = random.randint(BOULDER_BASE_Y_MIN, BOULDER_BASE_Y_MAX)
+        boulder.amplitude = random.randint(BOULDER_AMPLITUDE_MIN, BOULDER_AMPLITUDE_MAX)
+        boulder.phase = random.uniform(0, 2 * math.pi)
+        boulder.phase_speed = random.uniform(BOULDER_PHASE_SPEED_MIN, BOULDER_PHASE_SPEED_MAX)
+        boulder.center_y = boulder.base_y + boulder.amplitude * math.sin(boulder.phase)
+        return boulder
+
+    def move_boulders(self, delta_time):
+        for boulder in self.scene.get_sprite_list("Boulders"):
+            boulder.center_x -= PIPE_SPEED
+            boulder.phase += boulder.phase_speed * delta_time
+            boulder.center_y = boulder.base_y + boulder.amplitude * math.sin(boulder.phase)
+            if boulder.right < 0:
+                boulder.remove_from_sprite_lists()
 
     def make_mountain(self, x):
         mountain = arcade.Sprite(self.mountain_texture, scale=MOUNTAIN_SCALE)
