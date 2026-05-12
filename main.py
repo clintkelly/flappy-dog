@@ -109,6 +109,9 @@ RING_ANIMATION_FRAME_DURATION = 0.05  # seconds per frame for the ring spin
 RING_COMBO_BONUS_STEP = 1     # extra points added per consecutive ring beyond the first
 RING_PITCH_STEP = 0.06        # play_sound speed delta per consecutive ring
 RING_PITCH_MAX = 1.9          # cap so the chime doesn't go cartoonish
+# Static "risk" rings placed near the floor under a boulder spawn.
+BONUS_RING_Y_MIN = 80
+BONUS_RING_Y_MAX = 130
 
 # Ring-collection particle burst (code-only — uses SpriteCircle).
 PARTICLES_PER_BURST = 12
@@ -585,6 +588,9 @@ class GameView(arcade.View):
             score_zone.center_y = WINDOW_HEIGHT // 2
             score_zone.visible = False
             self.scene.add_sprite("ScoreZones", score_zone)
+            # Risk-reward: a static bonus ring near the floor, tempting the player to
+            # fly *under* the boulder instead of over it.
+            self.scene.add_sprite("Rings", self.make_bonus_ring(column_x))
         else:
             # Column pair (static or oscillating). Difficulty scaling applies in both cases.
             gap_factor = 1.0 + (GAP_RATIO_AT_MAX_DIFFICULTY - 1.0) * t
@@ -682,6 +688,17 @@ class GameView(arcade.View):
         ring.phase = random.uniform(0, 2 * math.pi)
         ring.phase_speed = random.uniform(RING_PHASE_SPEED_MIN, RING_PHASE_SPEED_MAX)
         ring.center_y = ring.base_y + ring.amplitude * math.sin(ring.phase)
+        return ring
+
+    def make_bonus_ring(self, x):
+        """ Static low-altitude ring used as a risk-reward pickup under boulders. """
+        ring = arcade.Sprite(self.ring_textures[0], scale=RING_SCALE)
+        ring.center_x = x
+        ring.center_y = random.randint(BONUS_RING_Y_MIN, BONUS_RING_Y_MAX)
+        ring.base_y = ring.center_y
+        ring.amplitude = 0
+        ring.phase = 0
+        ring.phase_speed = 0
         return ring
 
     def spawn_ring_burst(self, x, y):
