@@ -8,6 +8,7 @@ from pathlib import Path
 import math
 
 import arcade
+import pyglet
 import random
 
 from score_store import DEFAULT_PROFILE, ScoreStore
@@ -24,6 +25,18 @@ PLAYER_X_FRICTION = 0.5
 
 GRAVITY = 0.6
 FLAP_VELOCITY = 10
+# How far below the bottom edge the bird's center can dip before it counts as a
+# crash. Gives the player a chance to flap back up after a near-miss with the floor.
+BOTTOM_GRACE_PIXELS = 35
+
+# Game-over card layout and the cooldown before replay input is accepted.
+GAME_OVER_INPUT_DELAY = 2.0
+GAME_OVER_CARD_LEFT = 240
+GAME_OVER_CARD_BOTTOM = 130
+GAME_OVER_CARD_WIDTH = WINDOW_WIDTH - 480       # 800
+GAME_OVER_CARD_HEIGHT = WINDOW_HEIGHT - 260     # 460
+GAME_OVER_CARD_FILL = (0, 0, 0, 225)
+GAME_OVER_CARD_BORDER = arcade.color.GOLD
 
 # Score zone is a thin trip-wire placed just past the right edge of the column.
 # The bird only scores once it has fully cleared the column, and the zone is
@@ -43,11 +56,14 @@ MIN_PIPE_SPACING = 240
 MAX_PIPE_SPACING = 360
 
 # Difficulty progression. Both the vertical gap and the horizontal spacing
-# shrink toward these ratios as the score climbs to DIFFICULTY_RAMP_SCORE.
-# Lower DIFFICULTY_RAMP_SCORE = harder faster.
-# Lower *_AT_MAX_DIFFICULTY = harder peak (e.g. 0.50 means tightens to 50% of base).
+# scale by an interpolated factor: easier than base at score 0, then shrink
+# past base to a tougher peak as the score climbs to DIFFICULTY_RAMP_SCORE.
+# Higher *_AT_START = easier opening (e.g. 1.30 means gaps are 30% bigger than base).
+# Lower *_AT_MAX_DIFFICULTY = harder peak (e.g. 0.65 = tightens to 65% of base).
 DIFFICULTY_RAMP_SCORE = 30
+GAP_RATIO_AT_START = 1.30
 GAP_RATIO_AT_MAX_DIFFICULTY = 0.65
+SPACING_RATIO_AT_START = 1.20
 SPACING_RATIO_AT_MAX_DIFFICULTY = 0.75
 
 PLAYER_ANIMATION_FRAME_DURATION = 0.05  # seconds per frame
@@ -55,6 +71,10 @@ ASSET_DIR = Path(__file__).parent / "assets"
 SCORES_PATH = Path(__file__).parent / "scores.json"
 
 MAX_PROFILE_NAME_LENGTH = 12
+
+# Gamepad: deadzone applied to the left-stick X axis when emulating LEFT/RIGHT
+# key presses. Below this threshold the stick is considered centered.
+GAMEPAD_STICK_DEADZONE = 0.4
 
 COLUMN_TILE_SIZE = 64  # native pixels per side
 COLUMN_TILE_SCALE = 3
@@ -158,6 +178,46 @@ MILESTONE_TEXT_START_SIZE = 80
 MILESTONE_TEXT_END_SIZE = 140
 MILESTONE_COLOR = arcade.color.GOLD
 MILESTONE_VOLUME = 0.7
+
+# Rescuable wolf — rare, floats in a shimmering bubble. Touch = free + big bonus.
+WOLF_SPAWN_CHANCE = 0.05            # 5% of obstacle slots — rare and special
+WOLF_SCALE = 3                      # 64 native -> 192 rendered
+WOLF_POINTS = 50
+WOLF_HOWL_VOLUME = 0.85
+# Spawn either in the upper band or the lower band — off the safe central path
+# so reaching the bubble is a deliberate altitude commitment.
+WOLF_Y_LOW_MIN = 150
+WOLF_Y_LOW_MAX = 250
+WOLF_Y_HIGH_MIN = WINDOW_HEIGHT - 250
+WOLF_Y_HIGH_MAX = WINDOW_HEIGHT - 150
+# Bubble pulses around this radius; collision and visuals scale with it.
+WOLF_BUBBLE_RADIUS = 110
+WOLF_BUBBLE_PULSE_AMPLITUDE = 6
+WOLF_BUBBLE_PULSE_SPEED = 2.5       # radians/sec
+WOLF_BUBBLE_OUTLINE_COLOR = (255, 255, 255, 220)
+WOLF_BUBBLE_FILL_INNER = (230, 245, 255, 85)
+WOLF_BUBBLE_FILL_MIDDLE = (200, 230, 255, 55)
+WOLF_BUBBLE_FILL_OUTER = (180, 220, 255, 35)
+# Freed-wolf animation
+WOLF_FREED_INITIAL_VELOCITY = 200   # px/sec upward at the moment of rescue
+WOLF_FREED_RISE_ACCEL = 350         # px/sec/sec — accelerates upward
+WOLF_FREED_LIFETIME = 1.6           # seconds before the wolf vanishes
+# Celebration particle burst — much bigger than rings/coins
+WOLF_PARTICLES_PER_BURST = 80
+WOLF_PARTICLE_COLORS = (
+    arcade.color.GOLD,
+    arcade.color.ORANGE,
+    arcade.color.MAGENTA,
+    arcade.color.CYAN,
+    arcade.color.WHITE,
+    arcade.color.YELLOW,
+    arcade.color.LIGHT_BLUE,
+    arcade.color.HOT_PINK,
+)
+WOLF_CELEBRATION_COLOR = arcade.color.CYAN
+# After a wolf, the very next column's gap_center is clamped to within this
+# delta of the wolf's altitude so the player can actually reach it.
+WOLF_REACHABLE_DELTA_Y = 200
 
 # Weather. RainSystem is a self-contained falling-rain effect; WeatherController
 # composes it with a thunderstorm state machine (clear → storm-onset → storm → clear)
@@ -540,7 +600,7 @@ class TitleView(arcade.View):
             anchor_y="center",
         )
         self.prompt_text = arcade.Text(
-            "Press SPACE to start  •  Press Q to quit",
+            "Press SPACE or A to start  •  Q or B to quit",
             x=WINDOW_WIDTH // 2,
             y=64,
             color=arcade.color.YELLOW,
@@ -549,7 +609,7 @@ class TitleView(arcade.View):
             anchor_y="center",
         )
         self.controls_text = arcade.Text(
-            "SPACE flap   •   LEFT/RIGHT drift   •   P pause   •   N profile   •   H high scores",
+            "SPACE/A flap   •   ←→/Dpad drift   •   P/Start pause   •   N profile   •   H/Y scores",
             x=WINDOW_WIDTH // 2,
             y=28,
             color=arcade.color.WHITE,
@@ -589,6 +649,16 @@ class TitleView(arcade.View):
         elif key == arcade.key.H:
             self.window.show_view(HighScoreView())
 
+    def on_button_press(self, button):
+        if button in ("a", "start"):
+            self.on_key_press(arcade.key.SPACE, 0)
+        elif button in ("b", "back"):
+            self.on_key_press(arcade.key.Q, 0)
+        elif button == "x":
+            self.on_key_press(arcade.key.N, 0)
+        elif button == "y":
+            self.on_key_press(arcade.key.H, 0)
+
 
 class ProfilePickerView(arcade.View):
     """ List of known profiles to pick from, plus an inline "add new" option. """
@@ -614,7 +684,7 @@ class ProfilePickerView(arcade.View):
             bold=True,
         )
         self.hint_text = arcade.Text(
-            "[↑↓] navigate   •   [Enter] select   •   [N] new   •   [Esc] cancel",
+            "[↑↓ or Dpad] navigate   •   [Enter or A] select   •   [N keyboard] new   •   [Esc or B] cancel",
             x=WINDOW_WIDTH // 2,
             y=120,
             color=(200, 200, 200),
@@ -767,6 +837,22 @@ class ProfilePickerView(arcade.View):
             self.name_buffer = self.name_buffer[:-1]
             self._refresh_name_prompt()
 
+    def on_button_press(self, button):
+        # While typing a new name, only "cancel" is available on the gamepad —
+        # creating a new profile requires the keyboard.
+        if self.entering_name:
+            if button in ("b", "back"):
+                self._handle_name_input_key(arcade.key.ESCAPE)
+            return
+        if button == "dpup":
+            self.on_key_press(arcade.key.UP, 0)
+        elif button == "dpdown":
+            self.on_key_press(arcade.key.DOWN, 0)
+        elif button in ("a", "start"):
+            self.on_key_press(arcade.key.ENTER, 0)
+        elif button in ("b", "back"):
+            self.on_key_press(arcade.key.ESCAPE, 0)
+
 
 class HighScoreView(arcade.View):
     """ List of top scores across all profiles, presented as a centered card. """
@@ -798,7 +884,7 @@ class HighScoreView(arcade.View):
             bold=True,
         )
         self.back_text = arcade.Text(
-            "Press Esc to return",
+            "Press Esc, A, or B to return",
             x=WINDOW_WIDTH // 2,
             y=95,
             color=(200, 200, 200),
@@ -858,6 +944,10 @@ class HighScoreView(arcade.View):
     def on_key_press(self, key, modifiers):
         if key == arcade.key.ESCAPE:
             self.window.show_view(TitleView())
+
+    def on_button_press(self, button):
+        if button in ("a", "b", "back", "start"):
+            self.on_key_press(arcade.key.ESCAPE, 0)
 
 
 class GameView(arcade.View):
@@ -933,6 +1023,10 @@ class GameView(arcade.View):
         self.coin_sound = arcade.load_sound(":resources:sounds/coin1.wav")
         self.ring_sound = arcade.load_sound(":resources:sounds/upgrade1.wav")
         self.milestone_sound = arcade.load_sound(":resources:sounds/secret2.wav")
+        self.howl_sound = arcade.load_sound(ASSET_DIR / "howl.wav")
+
+        self.wolf_standing_texture = arcade.load_texture(ASSET_DIR / "wolf_standing.png")
+        self.wolf_howling_texture = arcade.load_texture(ASSET_DIR / "wolf_howling.png")
 
         # Weather: rain + thunderstorm cycle. Both sound files are optional;
         # drop assets/rain.{wav,ogg,mp3} and/or assets/thunder.{wav,ogg,mp3}
@@ -976,27 +1070,62 @@ class GameView(arcade.View):
 
         self.score = 0
         self.is_paused = False
+        # Tracks whether the analog stick is currently "pushed" past the
+        # deadzone — emulates LEFT/RIGHT keyboard press/release transitions.
+        self._stick_left_pressed = False
+        self._stick_right_pressed = False
         self.score_text = arcade.Text(f"Score: {self.score}", x=10, y=WINDOW_HEIGHT - 20, color=arcade.color.WHITE, font_size=14)
         self.paused_text = arcade.Text(
-            "PAUSED",
+            "PAUSED  (P or A to resume)",
             x=WINDOW_WIDTH - 10,
             y=WINDOW_HEIGHT - 20,
             color=arcade.color.YELLOW,
             font_size=14,
             anchor_x="right",
         )
-        self.game_over_text = arcade.Text(
+        # Game-over panel: hierarchy of separate text elements drawn over a card
+        # so the screen reads as a finished, intentional state.
+        self.game_over_heading_text = arcade.Text(
             "GAME OVER",
-            x=WINDOW_WIDTH // 2,
-            y=WINDOW_HEIGHT // 2,
-            color=arcade.color.RED,
-            font_size=48,
-            anchor_x="center",
-            anchor_y="center",
-            multiline=True,
-            width=WINDOW_WIDTH,
-            align="center",
+            x=WINDOW_WIDTH // 2, y=520,
+            color=arcade.color.CRIMSON,
+            font_size=72, anchor_x="center", anchor_y="center", bold=True,
         )
+        self.game_over_score_text = arcade.Text(
+            "", x=WINDOW_WIDTH // 2, y=435,
+            color=arcade.color.WHITE,
+            font_size=36, anchor_x="center", anchor_y="center", bold=True,
+        )
+        self.game_over_best_text = arcade.Text(
+            "", x=WINDOW_WIDTH // 2, y=385,
+            color=arcade.color.GOLD,
+            font_size=26, anchor_x="center", anchor_y="center",
+        )
+        self.game_over_new_record_text = arcade.Text(
+            "★  NEW RECORD!  ★", x=WINDOW_WIDTH // 2, y=345,
+            color=arcade.color.HOT_PINK,
+            font_size=22, anchor_x="center", anchor_y="center", bold=True,
+        )
+        self.game_over_replay_text = arcade.Text(
+            "Press ENTER or A to play again",
+            x=WINDOW_WIDTH // 2, y=270,
+            color=arcade.color.WHITE,
+            font_size=22, anchor_x="center", anchor_y="center", bold=True,
+        )
+        self.game_over_title_back_text = arcade.Text(
+            "Press R or B for title",
+            x=WINDOW_WIDTH // 2, y=230,
+            color=(200, 200, 200),
+            font_size=20, anchor_x="center", anchor_y="center",
+        )
+        self.game_over_quit_text = arcade.Text(
+            "Press Q to quit",
+            x=WINDOW_WIDTH // 2, y=195,
+            color=(200, 200, 200),
+            font_size=20, anchor_x="center", anchor_y="center",
+        )
+        self.is_new_record = False
+        self.game_over_time = 0.0
 
         # Mountains sit furthest back — added first so they draw behind clouds.
         self.scene.add_sprite_list("Mountains")
@@ -1024,6 +1153,12 @@ class GameView(arcade.View):
         self.scene.add_sprite_list("ScoreZones")
         self.scene.add_sprite_list("Particles")
         self.floating_texts = []
+        # Wolves live outside the scene so we can draw their bubble glow
+        # behind the wolf sprite at exactly the right z-order.
+        self.wolves: list[arcade.Sprite] = []
+        # When a wolf spawns, it stashes its y here so the *next* column's
+        # gap_center is clamped near that altitude (reachable in one transition).
+        self.next_gap_center_bias: float | None = None
 
         self.player_sprite.change_y = 0
         self.moving_horizontally = False
@@ -1036,8 +1171,11 @@ class GameView(arcade.View):
         if self.is_game_over:
             # Deliberately ignore SPACE here — players are usually still flapping
             # when they die and would otherwise blow past the game-over screen.
+            # Replay is also gated on GAME_OVER_INPUT_DELAY so a mashed ENTER
+            # right at death doesn't accidentally skip the score screen.
             if key == arcade.key.ENTER or key == arcade.key.RETURN:
-                self.window.show_view(GameView())
+                if self.game_over_time >= GAME_OVER_INPUT_DELAY:
+                    self.window.show_view(GameView())
             elif key == arcade.key.R:
                 self.window.show_view(TitleView())
             elif key == arcade.key.Q:
@@ -1072,6 +1210,56 @@ class GameView(arcade.View):
             #self.player_sprite.change_x = 0
             self.moving_horizontally = False
 
+    def on_button_press(self, button):
+        # Game-over branch: A/Start = play again, B = back to title.
+        if self.is_game_over:
+            if button in ("a", "start"):
+                self.on_key_press(arcade.key.ENTER, 0)
+            elif button in ("b", "back"):
+                self.on_key_press(arcade.key.R, 0)
+            return
+        # Pause branch: A/Start = unpause.
+        if self.is_paused:
+            if button in ("a", "start"):
+                self.on_key_press(arcade.key.P, 0)
+            return
+        # Live gameplay.
+        if button == "a":
+            self.on_key_press(arcade.key.SPACE, 0)
+        elif button == "start":
+            self.on_key_press(arcade.key.P, 0)
+        elif button == "dpleft":
+            self.on_key_press(arcade.key.LEFT, 0)
+        elif button == "dpright":
+            self.on_key_press(arcade.key.RIGHT, 0)
+
+    def on_button_release(self, button):
+        if self.is_paused or self.is_game_over:
+            return
+        if button == "dpleft":
+            self.on_key_release(arcade.key.LEFT, 0)
+        elif button == "dpright":
+            self.on_key_release(arcade.key.RIGHT, 0)
+
+    def on_stick_motion(self, x, _y):
+        """ Emulate LEFT/RIGHT key presses from the left-stick X axis. (Y unused.) """
+        if self.is_paused or self.is_game_over:
+            return
+        pressed_left = x < -GAMEPAD_STICK_DEADZONE
+        if pressed_left and not self._stick_left_pressed:
+            self.on_key_press(arcade.key.LEFT, 0)
+            self._stick_left_pressed = True
+        elif not pressed_left and self._stick_left_pressed:
+            self.on_key_release(arcade.key.LEFT, 0)
+            self._stick_left_pressed = False
+        pressed_right = x > GAMEPAD_STICK_DEADZONE
+        if pressed_right and not self._stick_right_pressed:
+            self.on_key_press(arcade.key.RIGHT, 0)
+            self._stick_right_pressed = True
+        elif not pressed_right and self._stick_right_pressed:
+            self.on_key_release(arcade.key.RIGHT, 0)
+            self._stick_right_pressed = False
+
 
     def on_hide_view(self):
         # Stop any active rain loop when leaving GameView (replay / back to title).
@@ -1087,6 +1275,7 @@ class GameView(arcade.View):
         self.weather.update(delta_time)
 
         if self.is_game_over:
+            self.game_over_time += delta_time
             return
 
         self.player_sprite.change_y -= GRAVITY
@@ -1125,6 +1314,7 @@ class GameView(arcade.View):
         self.move_boulders(delta_time)
         self.move_rings(delta_time)
         self.move_coins(delta_time)
+        self.update_wolves(delta_time)
         self.update_particles(delta_time)
         self.update_floating_texts(delta_time)
 
@@ -1185,7 +1375,12 @@ class GameView(arcade.View):
             arcade.play_sound(self.coin_sound)
             coin.remove_from_sprite_lists()
 
-        if self.player_sprite.bottom < 0:
+        # Non-fatal: touching a caged wolf frees it for a big bonus.
+        self.check_wolf_collisions()
+
+        # Forgiving floor: bird can dip its center BOTTOM_GRACE_PIXELS past the
+        # bottom edge and still flap back up.
+        if self.player_sprite.center_y < -BOTTOM_GRACE_PIXELS:
             self.game_over()
 
     def game_over(self):
@@ -1203,19 +1398,10 @@ class GameView(arcade.View):
             store.save()
 
         new_best = max(previous_best, self.score)
-        is_new_record = self.score > previous_best and self.score > 0
-        best_line = f"Personal best: {new_best}"
-        if is_new_record:
-            best_line += "  ★ NEW!"
-
-        self.game_over_text.text = (
-            f"GAME OVER\n"
-            f"Final score: {self.score}\n"
-            f"{best_line}\n"
-            f"Press ENTER to play again\n"
-            f"Press R for title\n"
-            f"Press Q to quit"
-        )
+        self.is_new_record = self.score > previous_best and self.score > 0
+        self.game_over_score_text.text = f"Final score: {self.score}"
+        self.game_over_best_text.text = f"Personal best: {new_best}"
+        self.game_over_time = 0.0  # restart the input-cooldown clock
         arcade.play_sound(self.gameover_sound)
 
 
@@ -1306,19 +1492,28 @@ class GameView(arcade.View):
         if not self.should_generate_new_pipe():
             return
 
+        # Snapshot the wolf bias for THIS spawn, then clear so it only ever
+        # affects the immediate next obstacle after a wolf.
+        gap_bias = self.next_gap_center_bias
+        self.next_gap_center_bias = None
+
         # Difficulty factor: 0 at score 0, 1 once score >= DIFFICULTY_RAMP_SCORE.
+        # Each factor interpolates from its easier START value down to MAX_DIFFICULTY.
         t = min(self.score / DIFFICULTY_RAMP_SCORE, 1.0) if DIFFICULTY_RAMP_SCORE > 0 else 1.0
-        spacing_factor = 1.0 + (SPACING_RATIO_AT_MAX_DIFFICULTY - 1.0) * t
+        spacing_factor = lerp(SPACING_RATIO_AT_START, SPACING_RATIO_AT_MAX_DIFFICULTY, t)
 
         # Spawn just off the right edge of the screen
         column_x = WINDOW_WIDTH + COLUMN_TILE_RENDERED // 2
 
-        # Single roll picks ring / boulder / column-pair so probabilities don't compound.
+        # Single roll picks wolf / ring / boulder / column-pair so probabilities don't compound.
         roll = random.random()
-        if roll < RING_OBSTACLE_CHANCE:
+        if roll < WOLF_SPAWN_CHANCE:
+            # Rare rescue opportunity — wolf in a bubble at an off-center altitude.
+            self.spawn_wolf(column_x)
+        elif roll < WOLF_SPAWN_CHANCE + RING_OBSTACLE_CHANCE:
             # Bonus ring spawn (non-fatal pickup).
             self.scene.add_sprite("Rings", self.make_ring(column_x))
-        elif roll < RING_OBSTACLE_CHANCE + BOULDER_OBSTACLE_CHANCE:
+        elif roll < WOLF_SPAWN_CHANCE + RING_OBSTACLE_CHANCE + BOULDER_OBSTACLE_CHANCE:
             # Spawn a single oscillating boulder instead of a column pair. Constrain
             # its lowest swing so the bonus ring at the floor stays reachable.
             self.scene.add_sprite(
@@ -1341,7 +1536,7 @@ class GameView(arcade.View):
             self.scene.add_sprite("Rings", self.make_bonus_ring(column_x))
         else:
             # Column pair (static or oscillating). Difficulty scaling applies in both cases.
-            gap_factor = 1.0 + (GAP_RATIO_AT_MAX_DIFFICULTY - 1.0) * t
+            gap_factor = lerp(GAP_RATIO_AT_START, GAP_RATIO_AT_MAX_DIFFICULTY, t)
             gap_size = random.randint(
                 int(MIN_PIPE_CENTER_GAP * gap_factor),
                 int(MAX_PIPE_CENTER_GAP * gap_factor),
@@ -1351,16 +1546,25 @@ class GameView(arcade.View):
             if oscillating:
                 # Keep the gap center far enough from screen edges that the oscillation never
                 # pushes it off-screen.
-                gap_center = random.randint(
-                    MIN_PIPE_CENTER_GAP_Y + PIPE_AMPLITUDE_MAX,
-                    MAX_PIPE_CENTER_GAP_Y - PIPE_AMPLITUDE_MAX,
-                )
+                gap_y_min = MIN_PIPE_CENTER_GAP_Y + PIPE_AMPLITUDE_MAX
+                gap_y_max = MAX_PIPE_CENTER_GAP_Y - PIPE_AMPLITUDE_MAX
+            else:
+                gap_y_min = MIN_PIPE_CENTER_GAP_Y
+                gap_y_max = MAX_PIPE_CENTER_GAP_Y
+            # If the previous spawn was a wolf, clamp the gap to be reachable
+            # from the wolf's altitude so the player isn't stuck behind a column.
+            if gap_bias is not None:
+                gap_y_min = max(gap_y_min, int(gap_bias) - WOLF_REACHABLE_DELTA_Y)
+                gap_y_max = min(gap_y_max, int(gap_bias) + WOLF_REACHABLE_DELTA_Y)
+                if gap_y_min > gap_y_max:
+                    gap_y_min = gap_y_max = (gap_y_min + gap_y_max) // 2
+            gap_center = random.randint(gap_y_min, gap_y_max)
+            if oscillating:
                 amplitude = random.randint(PIPE_AMPLITUDE_MIN, PIPE_AMPLITUDE_MAX)
                 phase = random.uniform(0, 2 * math.pi)
                 phase_speed = random.uniform(PIPE_PHASE_SPEED_MIN, PIPE_PHASE_SPEED_MAX)
                 extend = PIPE_AMPLITUDE_MAX
             else:
-                gap_center = random.randint(MIN_PIPE_CENTER_GAP_Y, MAX_PIPE_CENTER_GAP_Y)
                 amplitude = 0
                 phase = 0
                 phase_speed = 0
@@ -1516,22 +1720,26 @@ class GameView(arcade.View):
         text.is_milestone = False
         self.floating_texts.append(text)
 
-    def spawn_milestone_text(self, value):
-        """ Big centered celebration text shown when the score crosses a threshold. """
+    def spawn_celebration_text(self, message, color=MILESTONE_COLOR):
+        """ Big centered "grow + fade" celebration text. Used by milestones and
+        wolf rescues alike. """
         text = arcade.Text(
-            f"{value}!",
+            message,
             x=WINDOW_WIDTH // 2,
             y=WINDOW_HEIGHT // 2,
-            color=MILESTONE_COLOR,
+            color=color,
             font_size=MILESTONE_TEXT_START_SIZE,
             anchor_x="center",
             anchor_y="center",
             bold=True,
         )
         text.lifetime = MILESTONE_TEXT_LIFETIME
-        text.base_rgb = tuple(MILESTONE_COLOR)[:3]
+        text.base_rgb = tuple(color)[:3]
         text.is_milestone = True
         self.floating_texts.append(text)
+
+    def spawn_milestone_text(self, value):
+        self.spawn_celebration_text(f"{value}!", MILESTONE_COLOR)
 
     def _award_score(self, points):
         """ Add points, refresh the HUD, and fire a milestone celebration when
@@ -1593,6 +1801,71 @@ class GameView(arcade.View):
             coin.center_x = center_x + (i - offset) * COIN_CLUSTER_SPACING_X
             coin.center_y = center_y
             self.scene.add_sprite("Coins", coin)
+
+    def spawn_wolf(self, x):
+        """ Spawn a caged-in-a-bubble wolf at the right edge, biased to upper
+        or lower band so reaching it requires altitude commitment. Also stashes
+        the y so the next column gap is constrained to be reachable. """
+        if random.random() < 0.5:
+            y = random.randint(WOLF_Y_LOW_MIN, WOLF_Y_LOW_MAX)
+        else:
+            y = random.randint(WOLF_Y_HIGH_MIN, WOLF_Y_HIGH_MAX)
+        wolf = arcade.Sprite(self.wolf_standing_texture, scale=WOLF_SCALE)
+        wolf.center_x = x
+        wolf.center_y = y
+        wolf.state = "caged"
+        wolf.bubble_phase = random.uniform(0, 2 * math.pi)
+        wolf.freed_velocity_y = 0.0
+        wolf.freed_timer = 0.0
+        self.wolves.append(wolf)
+        self.next_gap_center_bias = y
+
+    def update_wolves(self, delta_time):
+        for wolf in self.wolves[:]:
+            if wolf.state == "caged":
+                wolf.center_x -= PIPE_SPEED
+                wolf.bubble_phase += WOLF_BUBBLE_PULSE_SPEED * delta_time
+                if wolf.right < 0:
+                    self.wolves.remove(wolf)
+            else:  # freed
+                wolf.freed_velocity_y += WOLF_FREED_RISE_ACCEL * delta_time
+                wolf.center_y += wolf.freed_velocity_y * delta_time
+                wolf.center_x -= PIPE_SPEED
+                wolf.freed_timer += delta_time
+                if (wolf.freed_timer >= WOLF_FREED_LIFETIME
+                        or wolf.bottom > WINDOW_HEIGHT):
+                    self.wolves.remove(wolf)
+
+    def draw_wolves(self):
+        for wolf in self.wolves:
+            if wolf.state == "caged":
+                # Pulsing translucent bubble — three concentric glow rings + a
+                # bright outline give it a "magical sphere" feel.
+                pulse = math.sin(wolf.bubble_phase) * WOLF_BUBBLE_PULSE_AMPLITUDE
+                r = WOLF_BUBBLE_RADIUS + pulse
+                arcade.draw_circle_filled(wolf.center_x, wolf.center_y, r + 18, WOLF_BUBBLE_FILL_OUTER)
+                arcade.draw_circle_filled(wolf.center_x, wolf.center_y, r + 9, WOLF_BUBBLE_FILL_MIDDLE)
+                arcade.draw_circle_filled(wolf.center_x, wolf.center_y, r, WOLF_BUBBLE_FILL_INNER)
+                arcade.draw_circle_outline(wolf.center_x, wolf.center_y, r, WOLF_BUBBLE_OUTLINE_COLOR, 2)
+            arcade.draw_sprite(wolf)
+
+    def check_wolf_collisions(self):
+        for wolf in self.wolves:
+            if wolf.state == "caged" and arcade.check_for_collision(self.player_sprite, wolf):
+                self._rescue_wolf(wolf)
+
+    def _rescue_wolf(self, wolf):
+        wolf.state = "freed"
+        wolf.texture = self.wolf_howling_texture
+        wolf.freed_velocity_y = WOLF_FREED_INITIAL_VELOCITY
+        self._award_score(WOLF_POINTS)
+        arcade.play_sound(self.howl_sound, volume=WOLF_HOWL_VOLUME)
+        self.spawn_burst(
+            wolf.center_x, wolf.center_y,
+            count=WOLF_PARTICLES_PER_BURST,
+            colors=WOLF_PARTICLE_COLORS,
+        )
+        self.spawn_celebration_text(f"WOLF SAVED!  +{WOLF_POINTS}", WOLF_CELEBRATION_COLOR)
 
     def move_coins(self, delta_time):
         # Shared spin animation, like rings — every coin shows the same frame.
@@ -1660,6 +1933,8 @@ class GameView(arcade.View):
         self.gui_camera.use()
         arcade.draw_sprite(self.sky_sprite)
         self.scene.draw()
+        # Wolves sit on top of obstacles so the bubble glow reads cleanly.
+        self.draw_wolves()
         # Weather sits in front of the game world (camera-lens style) — rain
         # plus any active lightning flash overlay — but behind the HUD so
         # floating text and the score remain legible.
@@ -1670,7 +1945,107 @@ class GameView(arcade.View):
         if self.is_paused:
             self.paused_text.draw()
         if self.is_game_over:
-            self.game_over_text.draw()
+            self._draw_game_over_panel()
+
+    def _draw_game_over_panel(self):
+        # Centered card backdrop with a gold border so the text sits on a solid
+        # black panel instead of the busy game world.
+        arcade.draw_lbwh_rectangle_filled(
+            GAME_OVER_CARD_LEFT, GAME_OVER_CARD_BOTTOM,
+            GAME_OVER_CARD_WIDTH, GAME_OVER_CARD_HEIGHT,
+            GAME_OVER_CARD_FILL,
+        )
+        arcade.draw_lbwh_rectangle_outline(
+            GAME_OVER_CARD_LEFT, GAME_OVER_CARD_BOTTOM,
+            GAME_OVER_CARD_WIDTH, GAME_OVER_CARD_HEIGHT,
+            GAME_OVER_CARD_BORDER, 3,
+        )
+        self.game_over_heading_text.draw()
+        self.game_over_score_text.draw()
+        self.game_over_best_text.draw()
+        if self.is_new_record:
+            self.game_over_new_record_text.draw()
+
+        # Replay prompt fades in over the input-cooldown window so the player
+        # can't accidentally mash past their score.
+        progress = min(self.game_over_time / GAME_OVER_INPUT_DELAY, 1.0)
+        alpha = int(60 + 195 * progress)  # 60 -> 255
+        self.game_over_replay_text.color = (255, 255, 255, alpha)
+        self.game_over_replay_text.draw()
+
+        self.game_over_title_back_text.draw()
+        self.game_over_quit_text.draw()
+
+
+def _silence_macos_hid_keyerror():
+    """ Some HID controllers (notably the Nintendo Switch Pro Controller) report
+    element cookies that pyglet's macOS Controller mapping doesn't recognize.
+    pyglet's PygletDevice.device_value_changed then raises KeyError, ctypes
+    catches it but spams a traceback to stderr on every report. The unmapped
+    element doesn't matter — every standard button/stick still works — so we
+    patch the callback to swallow KeyError silently.
+    """
+    try:
+        from pyglet.input.macos.darwin_hid import PygletDevice
+    except Exception:
+        return
+    if getattr(PygletDevice, "_skywing_keyerror_patched", False):
+        return
+    original = PygletDevice.device_value_changed
+    def safe_device_value_changed(self, hid_device, hid_value):
+        try:
+            original(self, hid_device, hid_value)
+        except KeyError:
+            pass
+    PygletDevice.device_value_changed = safe_device_value_changed
+    PygletDevice._skywing_keyerror_patched = True
+
+
+def _setup_gamepad(window):
+    """ Attach gamepad event handlers to `window` if a controller is connected.
+
+    Routes button/stick events to the currently-active view via its
+    `on_button_press` / `on_button_release` / `on_stick_motion` methods so each
+    view defines its own gamepad → action mapping. If no controller is found
+    (or pyglet can't open one) the function returns silently and the game
+    falls back to keyboard-only input.
+    """
+    _silence_macos_hid_keyerror()
+    try:
+        controllers = pyglet.input.get_controllers()
+    except Exception:
+        return None
+    if not controllers:
+        return None
+    controller = controllers[0]
+    try:
+        controller.open()
+    except Exception:
+        return None
+
+    @controller.event
+    def on_button_press(controller_, button):
+        view = window.current_view
+        if view is not None and hasattr(view, "on_button_press"):
+            view.on_button_press(button)
+
+    @controller.event
+    def on_button_release(controller_, button):
+        view = window.current_view
+        if view is not None and hasattr(view, "on_button_release"):
+            view.on_button_release(button)
+
+    @controller.event
+    def on_stick_motion(controller_, stick, vector):
+        if stick != "leftstick":
+            return
+        view = window.current_view
+        if view is not None and hasattr(view, "on_stick_motion"):
+            view.on_stick_motion(vector.x, vector.y)
+
+    # Keep a reference so the controller isn't garbage-collected.
+    window._gamepad = controller
+    return controller
 
 
 def main():
@@ -1679,6 +2054,7 @@ def main():
     window = arcade.Window(WINDOW_WIDTH, WINDOW_HEIGHT, WINDOW_TITLE)
     window.background_color = arcade.color.SKY_BLUE
     window.score_store = score_store
+    _setup_gamepad(window)
     window.show_view(TitleView())
     arcade.run()
 

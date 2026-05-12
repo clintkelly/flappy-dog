@@ -32,6 +32,24 @@ uv run python main.py
 | `H` | View high-score board (title screen) |
 | `Q` | Quit |
 
+## Gamepad
+
+If a controller is plugged in at launch the game auto-detects it (pyglet `Controller` API). Mapping uses Xbox labels (same physical buttons on PlayStation in the same positions):
+
+| Button | Title | Gameplay | Game-over | Profile picker | High scores |
+| --- | --- | --- | --- | --- | --- |
+| `A` | Start game | Flap | Play again | Select profile | Back |
+| `B` | Quit | — | Back to title | Cancel | Back |
+| `X` | Profile picker | — | — | — | — |
+| `Y` | High scores | — | — | — | — |
+| `Start` | Start game | Pause / unpause | Play again | Select | Back |
+| `Back` | Quit | — | — | Cancel | Back |
+| D-pad ← / → | — | Drift left / right | — | — | — |
+| D-pad ↑ / ↓ | — | — | — | Navigate list | — |
+| Left stick X | — | Drift (analog) | — | — | — |
+
+Creating a *new* profile still requires the keyboard (`N` on the title, then type the name) — every other action is available on the gamepad.
+
 ## How to play
 
 Tap `Space` to flap upward against gravity. Drift through the gaps between stone columns — touching a column or flying off the top or bottom of the screen ends the game. You score one point each time you fully clear a column.
