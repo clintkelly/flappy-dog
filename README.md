@@ -28,7 +28,7 @@ uv run python main.py
 | `Right` / `D` | Drift right |
 | `P` | Pause / unpause |
 | `R` | Return to title (game-over only) |
-| `N` | Rename current profile (title screen) |
+| `N` | Open profile picker — switch profiles or add a new one (title screen) |
 | `H` | View high-score board (title screen) |
 | `Q` | Quit |
 
@@ -42,7 +42,7 @@ Press `P` any time during play to freeze the screen (handy for screenshots) and 
 
 ## Profiles and high scores
 
-Every finished run is appended to `scores.json` in the project root, tagged with the current profile name. The title screen shows the all-time high score and the active profile; press `N` to rename, `H` to view the top-10 leaderboard across all profiles. After each death, the game-over screen shows your personal best (with a `★ NEW!` flag when you set a new one).
+Every finished run is appended to `scores.json` in the project root, tagged with the current profile name. The title screen shows the all-time high score and the active profile; press `N` to open the profile picker (cycle through existing profiles with ↑/↓, `Enter` to select, or pick the `+ Add new profile…` row to type a new name), and `H` to view the top-10 leaderboard across all profiles. After each death, the game-over screen shows your personal best (with a `★ NEW!` flag when you set a new one).
 
 The `scores.json` file is git-ignored so each player keeps their own history.
 

@@ -91,6 +91,9 @@ BOULDER_AMPLITUDE_MIN = 80
 BOULDER_AMPLITUDE_MAX = 160
 BOULDER_PHASE_SPEED_MIN = 1.5   # radians/sec
 BOULDER_PHASE_SPEED_MAX = 2.5
+# When paired with a bottom bonus ring, keep the boulder's lowest swing above
+# this y so the bird never gets trapped between the rock and the floor.
+BOULDER_LOWEST_Y_WITH_BONUS_RING = 320
 
 # Oscillating column pairs — gap slides up/down while the column scrolls.
 # Roll fires only when the boulder roll missed. ~0.25 -> 20% of all spawns.
@@ -133,9 +136,30 @@ PARTICLE_COLORS = (
     arcade.color.WHITE,
 )
 
-# Floating "+N" text shown when a ring is collected.
+# Floating "+N" text shown when something is scored.
 FLOATING_TEXT_LIFETIME = 1.0       # seconds
 FLOATING_TEXT_RISE_SPEED = 1.5     # pixels per frame
+FLOATING_TEXT_START_SIZE = 32
+FLOATING_TEXT_END_SIZE = 60        # font_size grows over lifetime for a "pop" effect
+FLOATING_TEXT_COLORS = (
+    arcade.color.GOLD,
+    arcade.color.ORANGE,
+    arcade.color.MAGENTA,
+    arcade.color.CYAN,
+    arcade.color.YELLOW_GREEN,
+    arcade.color.HOT_PINK,
+    arcade.color.LIGHT_SKY_BLUE,
+)
+
+# Collectible coins placed in a row between obstacle spawns.
+COIN_SCALE = 1.5                   # 64 native -> 96 rendered
+COIN_ANIMATION_FRAME_DURATION = 0.06
+COINS_PER_CLUSTER = 3
+COIN_CLUSTER_SPACING_X = 110       # pixels between coin centers in a cluster
+COIN_Y_MIN = 200
+COIN_Y_MAX = WINDOW_HEIGHT - 200
+COIN_POINTS = 1
+COIN_PARTICLES_PER_BURST = 8
 
 
 def lerp(a, b, t):
@@ -191,29 +215,13 @@ class TitleView(arcade.View):
             anchor_y="center",
         )
         self.controls_text = arcade.Text(
-            "SPACE flap   •   LEFT/RIGHT drift   •   P pause   •   N rename   •   H high scores",
+            "SPACE flap   •   LEFT/RIGHT drift   •   P pause   •   N profile   •   H high scores",
             x=WINDOW_WIDTH // 2,
             y=28,
             color=arcade.color.WHITE,
             font_size=16,
             anchor_x="center",
             anchor_y="center",
-        )
-
-        # Name input mode state.
-        self.entering_name = False
-        self.name_buffer = ""
-        self.name_prompt_text = arcade.Text(
-            "",
-            x=WINDOW_WIDTH // 2,
-            y=WINDOW_HEIGHT // 2,
-            color=arcade.color.WHITE,
-            font_size=24,
-            anchor_x="center",
-            anchor_y="center",
-            multiline=True,
-            width=WINDOW_WIDTH - 80,
-            align="center",
         )
 
     def on_show_view(self):
@@ -236,8 +244,104 @@ class TitleView(arcade.View):
         self.profile_text.draw()
         self.prompt_text.draw()
         self.controls_text.draw()
+
+    def on_key_press(self, key, modifiers):
+        if key == arcade.key.SPACE:
+            self.window.show_view(GameView())
+        elif key == arcade.key.Q:
+            self.window.close()
+        elif key == arcade.key.N:
+            self.window.show_view(ProfilePickerView())
+        elif key == arcade.key.H:
+            self.window.show_view(HighScoreView())
+
+
+class ProfilePickerView(arcade.View):
+    """ List of known profiles to pick from, plus an inline "add new" option. """
+
+    CARD_LEFT = 240
+    CARD_BOTTOM = 90
+    CARD_WIDTH = WINDOW_WIDTH - 480
+    CARD_HEIGHT = WINDOW_HEIGHT - 180
+    LINE_HEIGHT = 36
+    LIST_TOP_Y = WINDOW_HEIGHT - 200
+    MAX_VISIBLE = 12
+
+    def __init__(self):
+        super().__init__()
+        self.title_text = arcade.Text(
+            "CHOOSE PROFILE",
+            x=WINDOW_WIDTH // 2,
+            y=WINDOW_HEIGHT - 130,
+            color=arcade.color.GOLD,
+            font_size=36,
+            anchor_x="center",
+            anchor_y="center",
+            bold=True,
+        )
+        self.hint_text = arcade.Text(
+            "[↑↓] navigate   •   [Enter] select   •   [N] new   •   [Esc] cancel",
+            x=WINDOW_WIDTH // 2,
+            y=120,
+            color=(200, 200, 200),
+            font_size=16,
+            anchor_x="center",
+            anchor_y="center",
+        )
+
+        # Entries: known profiles + an "Add new" sentinel as the final row.
+        self.entries: list[str] = []
+        self.selected_index = 0
+        self.entry_texts: list[arcade.Text] = []
+
+        # Sub-mode for typing a brand-new name.
+        self.entering_name = False
+        self.name_buffer = ""
+        self.name_prompt_text = arcade.Text(
+            "",
+            x=WINDOW_WIDTH // 2,
+            y=WINDOW_HEIGHT // 2,
+            color=arcade.color.WHITE,
+            font_size=24,
+            anchor_x="center",
+            anchor_y="center",
+            multiline=True,
+            width=WINDOW_WIDTH - 120,
+            align="center",
+        )
+
+    # ----- view lifecycle -----
+
+    def on_show_view(self):
+        store = self.window.score_store
+        # Existing profiles, then a sentinel row to add a new one.
+        self.entries = store.known_profiles() + ["+ Add new profile..."]
+        try:
+            self.selected_index = self.entries.index(store.current_profile)
+        except ValueError:
+            self.selected_index = 0
+        self._refresh_entry_texts()
+
+    def on_draw(self):
+        self.clear()
+        arcade.draw_lbwh_rectangle_filled(
+            self.CARD_LEFT, self.CARD_BOTTOM, self.CARD_WIDTH, self.CARD_HEIGHT,
+            (0, 0, 0, 210),
+        )
+        arcade.draw_lbwh_rectangle_outline(
+            self.CARD_LEFT, self.CARD_BOTTOM, self.CARD_WIDTH, self.CARD_HEIGHT,
+            arcade.color.GOLD, 3,
+        )
+        self.title_text.draw()
+        for text in self.entry_texts:
+            text.draw()
+        self.hint_text.draw()
         if self.entering_name:
-            arcade.draw_lbwh_rectangle_filled(120, 310, WINDOW_WIDTH - 240, 100, panel_color)
+            arcade.draw_lbwh_rectangle_filled(
+                self.CARD_LEFT + 30, WINDOW_HEIGHT // 2 - 60,
+                self.CARD_WIDTH - 60, 120,
+                (0, 0, 0, 235),
+            )
             self.name_prompt_text.draw()
 
     def on_key_press(self, key, modifiers):
@@ -245,14 +349,20 @@ class TitleView(arcade.View):
             self._handle_name_input_key(key)
             return
 
-        if key == arcade.key.SPACE:
-            self.window.show_view(GameView())
-        elif key == arcade.key.Q:
-            self.window.close()
+        if key == arcade.key.ESCAPE:
+            self.window.show_view(TitleView())
+        elif key in (arcade.key.UP, arcade.key.W):
+            if self.entries:
+                self.selected_index = (self.selected_index - 1) % len(self.entries)
+                self._refresh_entry_texts()
+        elif key in (arcade.key.DOWN, arcade.key.S):
+            if self.entries:
+                self.selected_index = (self.selected_index + 1) % len(self.entries)
+                self._refresh_entry_texts()
+        elif key == arcade.key.ENTER or key == arcade.key.RETURN:
+            self._confirm_selection()
         elif key == arcade.key.N:
             self._start_name_input()
-        elif key == arcade.key.H:
-            self.window.show_view(HighScoreView())
 
     def on_text(self, text):
         if not self.entering_name:
@@ -264,6 +374,39 @@ class TitleView(arcade.View):
                 self.name_buffer += ch
         self._refresh_name_prompt()
 
+    # ----- helpers -----
+
+    def _confirm_selection(self):
+        if not self.entries:
+            return
+        # The last row is always the "+ Add new" sentinel.
+        if self.selected_index == len(self.entries) - 1:
+            self._start_name_input()
+            return
+        store = self.window.score_store
+        store.current_profile = self.entries[self.selected_index]
+        store.save()
+        self.window.show_view(TitleView())
+
+    def _refresh_entry_texts(self):
+        self.entry_texts = []
+        visible = self.entries[: self.MAX_VISIBLE]
+        for i, name in enumerate(visible):
+            highlighted = i == self.selected_index
+            color = arcade.color.GOLD if highlighted else arcade.color.WHITE
+            prefix = "▶  " if highlighted else "    "
+            text = arcade.Text(
+                f"{prefix}{name}",
+                x=WINDOW_WIDTH // 2,
+                y=self.LIST_TOP_Y - i * self.LINE_HEIGHT,
+                color=color,
+                font_size=22,
+                anchor_x="center",
+                anchor_y="center",
+                bold=highlighted,
+            )
+            self.entry_texts.append(text)
+
     def _start_name_input(self):
         self.entering_name = True
         self.name_buffer = ""
@@ -271,7 +414,7 @@ class TitleView(arcade.View):
 
     def _refresh_name_prompt(self):
         self.name_prompt_text.text = (
-            f"Enter name (Enter to confirm, Esc to cancel):\n{self.name_buffer}_"
+            f"Enter new profile name (Enter to confirm, Esc to cancel):\n{self.name_buffer}_"
         )
 
     def _handle_name_input_key(self, key):
@@ -283,67 +426,99 @@ class TitleView(arcade.View):
                 store = self.window.score_store
                 store.current_profile = name
                 store.save()
-                self.profile_text.text = f"PROFILE: {name}"
-                self.high_score_text.text = f"HIGH SCORE: {store.all_time_best()}"
-            self.entering_name = False
+                self.window.show_view(TitleView())
+            else:
+                self.entering_name = False
         elif key == arcade.key.BACKSPACE:
             self.name_buffer = self.name_buffer[:-1]
             self._refresh_name_prompt()
 
 
 class HighScoreView(arcade.View):
-    """ List of top scores across all profiles. """
+    """ List of top scores across all profiles, presented as a centered card. """
+
+    CARD_LEFT = 160
+    CARD_BOTTOM = 60
+    CARD_WIDTH = WINDOW_WIDTH - 320
+    CARD_HEIGHT = WINDOW_HEIGHT - 120
+    ENTRY_LINE_HEIGHT = 38
+    ENTRIES_TOP_Y = 540
+
+    # Tiered colors so the podium reads at a glance.
+    RANK_COLORS = {
+        1: arcade.color.GOLD,
+        2: (210, 210, 210),  # silver
+        3: (205, 127, 50),   # bronze
+    }
 
     def __init__(self):
         super().__init__()
         self.title_text = arcade.Text(
             "HIGH SCORES",
             x=WINDOW_WIDTH // 2,
-            y=WINDOW_HEIGHT - 60,
+            y=WINDOW_HEIGHT - 100,
             color=arcade.color.GOLD,
-            font_size=42,
+            font_size=48,
             anchor_x="center",
             anchor_y="center",
-        )
-        self.entries_text = arcade.Text(
-            "",
-            x=WINDOW_WIDTH // 2,
-            y=WINDOW_HEIGHT // 2,
-            color=arcade.color.WHITE,
-            font_size=20,
-            anchor_x="center",
-            anchor_y="center",
-            multiline=True,
-            width=WINDOW_WIDTH - 80,
-            align="center",
+            bold=True,
         )
         self.back_text = arcade.Text(
             "Press Esc to return",
             x=WINDOW_WIDTH // 2,
-            y=40,
-            color=arcade.color.WHITE,
+            y=95,
+            color=(200, 200, 200),
             font_size=18,
             anchor_x="center",
             anchor_y="center",
         )
+        self.no_scores_text = arcade.Text(
+            "No scores yet — go play!",
+            x=WINDOW_WIDTH // 2,
+            y=WINDOW_HEIGHT // 2,
+            color=arcade.color.WHITE,
+            font_size=24,
+            anchor_x="center",
+            anchor_y="center",
+        )
+        self.entry_texts: list[arcade.Text] = []
 
     def on_show_view(self):
         store = self.window.score_store
         top = store.top_scores(n=10)
-        if not top:
-            self.entries_text.text = "No scores yet — go play!"
-            return
-
-        lines = []
+        self.entry_texts = []
         for rank, entry in enumerate(top, 1):
             date = entry.get("timestamp", "")[:10]
-            lines.append(f"{rank:2d}.  {entry['profile']}  —  {entry['score']}  ({date})")
-        self.entries_text.text = "\n".join(lines)
+            color = self.RANK_COLORS.get(rank, arcade.color.WHITE)
+            text = arcade.Text(
+                f"{rank:2d}.  {entry['profile']}  —  {entry['score']}  ({date})",
+                x=WINDOW_WIDTH // 2,
+                y=self.ENTRIES_TOP_Y - (rank - 1) * self.ENTRY_LINE_HEIGHT,
+                color=color,
+                font_size=22,
+                anchor_x="center",
+                anchor_y="center",
+            )
+            self.entry_texts.append(text)
 
     def on_draw(self):
         self.clear()
+        # Centered translucent card with a gold border so the text sits on a
+        # solid backdrop instead of the sky-blue clear color.
+        arcade.draw_lbwh_rectangle_filled(
+            self.CARD_LEFT, self.CARD_BOTTOM, self.CARD_WIDTH, self.CARD_HEIGHT,
+            (0, 0, 0, 210),
+        )
+        arcade.draw_lbwh_rectangle_outline(
+            self.CARD_LEFT, self.CARD_BOTTOM, self.CARD_WIDTH, self.CARD_HEIGHT,
+            arcade.color.GOLD, 3,
+        )
         self.title_text.draw()
-        self.entries_text.draw()
+        if self.entry_texts:
+            for text in self.entry_texts:
+                text.draw()
+        else:
+            self.no_scores_text.draw()
         self.back_text.draw()
 
     def on_key_press(self, key, modifiers):
@@ -394,6 +569,16 @@ class GameView(arcade.View):
         )
         self.ring_textures = [arcade.load_texture(p) for p in ring_paths]
 
+        # Coins ship as the first half of a rotation (face -> side); the second half is
+        # built by horizontally flipping the frames in reverse so the spin loops smoothly.
+        coin_paths = sorted(
+            ASSET_DIR.glob("coin*.png"),
+            key=lambda p: int(p.stem.replace("coin", "")),
+        )
+        forward = [arcade.load_texture(p) for p in coin_paths]
+        backward = [t.flip_left_right() for t in reversed(forward[:-1])]
+        self.coin_textures = forward + backward
+
         self.cloud_textures = [
             arcade.load_texture(p)
             for p in sorted(ASSET_DIR.glob("cloud*.png"))
@@ -433,6 +618,8 @@ class GameView(arcade.View):
         self.animation_time = 0.0
         self.ring_animation_frame = 0
         self.ring_animation_time = 0.0
+        self.coin_animation_frame = 0
+        self.coin_animation_time = 0.0
         self.ring_combo = 0
 
         self.gui_camera = arcade.Camera2D()
@@ -483,6 +670,7 @@ class GameView(arcade.View):
         self.scene.add_sprite_list("Pipes")
         self.scene.add_sprite_list("Boulders")
         self.scene.add_sprite_list("Rings")
+        self.scene.add_sprite_list("Coins")
         self.scene.add_sprite_list("ScoreZones")
         self.scene.add_sprite_list("Particles")
         self.floating_texts = []
@@ -571,6 +759,7 @@ class GameView(arcade.View):
         self.move_and_remove_existing_pipes(delta_time)
         self.move_boulders(delta_time)
         self.move_rings(delta_time)
+        self.move_coins(delta_time)
         self.update_particles(delta_time)
         self.update_floating_texts(delta_time)
 
@@ -599,13 +788,20 @@ class GameView(arcade.View):
             self.score += 1
             self.score_text.text = f"Score: {self.score}"
             arcade.play_sound(self.coin_sound)
+            # Spawn the floating text at the bird so it's visible regardless of
+            # the score zone's height (boulder zones span the whole window).
+            self.spawn_floating_text(
+                self.player_sprite.center_x,
+                self.player_sprite.center_y,
+                "+1",
+            )
 
         ring_hits = arcade.check_for_collision_with_list(
             self.player_sprite,
             self.scene["Rings"],
         )
         for ring in ring_hits:
-            self.spawn_ring_burst(ring.center_x, ring.center_y)
+            self.spawn_burst(ring.center_x, ring.center_y)
             self.ring_combo += 1
             bonus = RING_POINTS + (self.ring_combo - 1) * RING_COMBO_BONUS_STEP
             self.score += bonus
@@ -614,6 +810,18 @@ class GameView(arcade.View):
             pitch = min(1.0 + (self.ring_combo - 1) * RING_PITCH_STEP, RING_PITCH_MAX)
             arcade.play_sound(self.ring_sound, speed=pitch)
             ring.remove_from_sprite_lists()
+
+        coin_hits = arcade.check_for_collision_with_list(
+            self.player_sprite,
+            self.scene["Coins"],
+        )
+        for coin in coin_hits:
+            self.spawn_burst(coin.center_x, coin.center_y, count=COIN_PARTICLES_PER_BURST)
+            self.score += COIN_POINTS
+            self.score_text.text = f"Score: {self.score}"
+            self.spawn_floating_text(coin.center_x, coin.center_y, f"+{COIN_POINTS}")
+            arcade.play_sound(self.coin_sound)
+            coin.remove_from_sprite_lists()
 
         if self.player_sprite.bottom < 0:
             self.game_over()
@@ -748,16 +956,13 @@ class GameView(arcade.View):
         if roll < RING_OBSTACLE_CHANCE:
             # Bonus ring spawn (non-fatal pickup).
             self.scene.add_sprite("Rings", self.make_ring(column_x))
-            # Use the existing spacing factor for the next spawn and bail.
-            self.next_pipe_spacing = random.randint(
-                int(MIN_PIPE_SPACING * spacing_factor),
-                int(MAX_PIPE_SPACING * spacing_factor),
+        elif roll < RING_OBSTACLE_CHANCE + BOULDER_OBSTACLE_CHANCE:
+            # Spawn a single oscillating boulder instead of a column pair. Constrain
+            # its lowest swing so the bonus ring at the floor stays reachable.
+            self.scene.add_sprite(
+                "Boulders",
+                self.make_boulder(column_x, min_lowest_y=BOULDER_LOWEST_Y_WITH_BONUS_RING),
             )
-            return
-
-        if roll < RING_OBSTACLE_CHANCE + BOULDER_OBSTACLE_CHANCE:
-            # Spawn a single oscillating boulder instead of a column pair.
-            self.scene.add_sprite("Boulders", self.make_boulder(column_x))
             # Boulder score zone spans the full window height — the bird scores by clearing
             # the boulder horizontally regardless of its y at the moment.
             score_zone = arcade.SpriteSolidColor(
@@ -827,6 +1032,12 @@ class GameView(arcade.View):
             int(MAX_PIPE_SPACING * spacing_factor),
         )
 
+        # Drop a coin cluster halfway between this obstacle and the next one
+        # (both will be moving leftward in lock-step, so relative spacing is preserved).
+        coin_cluster_x = column_x + self.next_pipe_spacing // 2
+        coin_cluster_y = random.randint(COIN_Y_MIN, COIN_Y_MAX)
+        self.spawn_coin_cluster(coin_cluster_x, coin_cluster_y)
+
 
 
     def move_and_remove_existing_pipes(self, delta_time):
@@ -840,14 +1051,30 @@ class GameView(arcade.View):
                 if pipe.right < 0:
                     pipe.remove_from_sprite_lists()
 
-    def make_boulder(self, x):
+    def make_boulder(self, x, min_lowest_y=None):
+        """ Build a randomized oscillating boulder.
+
+        If min_lowest_y is given, the chosen base_y and amplitude are clamped so
+        that base_y - amplitude >= min_lowest_y (the boulder never dips below
+        that point). Used when a bonus ring is parked under it so the boulder
+        can't pin the bird against the floor.
+        """
+        amplitude = random.randint(BOULDER_AMPLITUDE_MIN, BOULDER_AMPLITUDE_MAX)
+        base_y_min = BOULDER_BASE_Y_MIN
+        if min_lowest_y is not None:
+            base_y_min = max(base_y_min, min_lowest_y + amplitude)
+            if base_y_min > BOULDER_BASE_Y_MAX:
+                # Constraint can't fit at this amplitude — shrink amplitude to fit.
+                amplitude = max(BOULDER_AMPLITUDE_MIN, BOULDER_BASE_Y_MAX - min_lowest_y)
+                base_y_min = min_lowest_y + amplitude
+
         boulder = arcade.Sprite(
             random.choice(self.boulder_textures),
             scale=BOULDER_SCALE,
         )
         boulder.center_x = x
-        boulder.base_y = random.randint(BOULDER_BASE_Y_MIN, BOULDER_BASE_Y_MAX)
-        boulder.amplitude = random.randint(BOULDER_AMPLITUDE_MIN, BOULDER_AMPLITUDE_MAX)
+        boulder.base_y = random.randint(base_y_min, BOULDER_BASE_Y_MAX)
+        boulder.amplitude = amplitude
         boulder.phase = random.uniform(0, 2 * math.pi)
         boulder.phase_speed = random.uniform(BOULDER_PHASE_SPEED_MIN, BOULDER_PHASE_SPEED_MAX)
         boulder.center_y = boulder.base_y + boulder.amplitude * math.sin(boulder.phase)
@@ -882,14 +1109,14 @@ class GameView(arcade.View):
         ring.phase_speed = 0
         return ring
 
-    def spawn_ring_burst(self, x, y):
-        """ Spawn a starburst of small circles at the ring's collection point. """
-        for _ in range(PARTICLES_PER_BURST):
+    def spawn_burst(self, x, y, count=PARTICLES_PER_BURST, colors=PARTICLE_COLORS):
+        """ Spawn an outward starburst of small circles at the collection point. """
+        for _ in range(count):
             angle = random.uniform(0, 2 * math.pi)
             speed = random.uniform(PARTICLE_SPEED_MIN, PARTICLE_SPEED_MAX)
             particle = arcade.SpriteCircle(
                 radius=random.randint(PARTICLE_RADIUS_MIN, PARTICLE_RADIUS_MAX),
-                color=random.choice(PARTICLE_COLORS),
+                color=random.choice(colors),
             )
             particle.center_x = x
             particle.center_y = y
@@ -909,13 +1136,15 @@ class GameView(arcade.View):
             else:
                 particle.alpha = int(255 * (particle.lifetime / PARTICLE_LIFETIME))
 
-    def spawn_floating_text(self, x, y, message, color=arcade.color.GOLD):
+    def spawn_floating_text(self, x, y, message, color=None):
+        if color is None:
+            color = random.choice(FLOATING_TEXT_COLORS)
         text = arcade.Text(
             message,
             x=x,
             y=y,
             color=color,
-            font_size=22,
+            font_size=FLOATING_TEXT_START_SIZE,
             anchor_x="center",
             anchor_y="center",
             bold=True,
@@ -931,6 +1160,8 @@ class GameView(arcade.View):
             if text.lifetime <= 0:
                 self.floating_texts.remove(text)
             else:
+                progress = 1.0 - (text.lifetime / FLOATING_TEXT_LIFETIME)
+                text.font_size = lerp(FLOATING_TEXT_START_SIZE, FLOATING_TEXT_END_SIZE, progress)
                 alpha = int(255 * (text.lifetime / FLOATING_TEXT_LIFETIME))
                 text.color = (*text.base_rgb, alpha)
 
@@ -951,6 +1182,29 @@ class GameView(arcade.View):
                 # Ring scrolled off without being collected — combo breaks.
                 self.ring_combo = 0
                 ring.remove_from_sprite_lists()
+
+    def spawn_coin_cluster(self, center_x, center_y):
+        """ Add COINS_PER_CLUSTER coins in a horizontal row centered at (x, y). """
+        offset = (COINS_PER_CLUSTER - 1) / 2
+        for i in range(COINS_PER_CLUSTER):
+            coin = arcade.Sprite(self.coin_textures[0], scale=COIN_SCALE)
+            coin.center_x = center_x + (i - offset) * COIN_CLUSTER_SPACING_X
+            coin.center_y = center_y
+            self.scene.add_sprite("Coins", coin)
+
+    def move_coins(self, delta_time):
+        # Shared spin animation, like rings — every coin shows the same frame.
+        self.coin_animation_time += delta_time
+        if self.coin_animation_time >= COIN_ANIMATION_FRAME_DURATION:
+            self.coin_animation_time -= COIN_ANIMATION_FRAME_DURATION
+            self.coin_animation_frame = (self.coin_animation_frame + 1) % len(self.coin_textures)
+        current_texture = self.coin_textures[self.coin_animation_frame]
+
+        for coin in self.scene.get_sprite_list("Coins"):
+            coin.center_x -= PIPE_SPEED
+            coin.texture = current_texture
+            if coin.right < 0:
+                coin.remove_from_sprite_lists()
 
     def make_mountain(self, x):
         mountain = arcade.Sprite(self.mountain_texture, scale=MOUNTAIN_SCALE)
