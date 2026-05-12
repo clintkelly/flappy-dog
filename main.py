@@ -10,6 +10,8 @@ import math
 import arcade
 import random
 
+from score_store import DEFAULT_PROFILE, ScoreStore
+
 # Constants
 WINDOW_WIDTH = 1280
 WINDOW_HEIGHT = 720
@@ -50,6 +52,9 @@ SPACING_RATIO_AT_MAX_DIFFICULTY = 0.75
 
 PLAYER_ANIMATION_FRAME_DURATION = 0.05  # seconds per frame
 ASSET_DIR = Path(__file__).parent / "assets"
+SCORES_PATH = Path(__file__).parent / "scores.json"
+
+MAX_PROFILE_NAME_LENGTH = 12
 
 COLUMN_TILE_SIZE = 64  # native pixels per side
 COLUMN_TILE_SCALE = 3
@@ -158,6 +163,24 @@ class TitleView(arcade.View):
             anchor_x="center",
             anchor_y="center",
         )
+        self.high_score_text = arcade.Text(
+            "",
+            x=WINDOW_WIDTH // 2,
+            y=WINDOW_HEIGHT - 78,
+            color=arcade.color.GOLD,
+            font_size=22,
+            anchor_x="center",
+            anchor_y="center",
+        )
+        self.profile_text = arcade.Text(
+            "",
+            x=WINDOW_WIDTH // 2,
+            y=98,
+            color=arcade.color.WHITE,
+            font_size=18,
+            anchor_x="center",
+            anchor_y="center",
+        )
         self.prompt_text = arcade.Text(
             "Press SPACE to start  •  Press Q to quit",
             x=WINDOW_WIDTH // 2,
@@ -168,7 +191,7 @@ class TitleView(arcade.View):
             anchor_y="center",
         )
         self.controls_text = arcade.Text(
-            "SPACE flap   •   LEFT/RIGHT drift   •   P pause",
+            "SPACE flap   •   LEFT/RIGHT drift   •   P pause   •   N rename   •   H high scores",
             x=WINDOW_WIDTH // 2,
             y=28,
             color=arcade.color.WHITE,
@@ -177,18 +200,155 @@ class TitleView(arcade.View):
             anchor_y="center",
         )
 
+        # Name input mode state.
+        self.entering_name = False
+        self.name_buffer = ""
+        self.name_prompt_text = arcade.Text(
+            "",
+            x=WINDOW_WIDTH // 2,
+            y=WINDOW_HEIGHT // 2,
+            color=arcade.color.WHITE,
+            font_size=24,
+            anchor_x="center",
+            anchor_y="center",
+            multiline=True,
+            width=WINDOW_WIDTH - 80,
+            align="center",
+        )
+
+    def on_show_view(self):
+        store = self.window.score_store
+        self.high_score_text.text = f"HIGH SCORE: {store.all_time_best()}"
+        self.profile_text.text = f"PROFILE: {store.current_profile}"
+
     def on_draw(self):
         self.clear()
         arcade.draw_sprite(self.title_image)
+
+        # Translucent panels behind the title-screen text so it stays legible
+        # against the cloud-and-mountain title art.
+        panel_color = (0, 0, 0, 170)
+        arcade.draw_lbwh_rectangle_filled(0, 610, WINDOW_WIDTH, 110, panel_color)
+        arcade.draw_lbwh_rectangle_filled(0, 0, WINDOW_WIDTH, 120, panel_color)
+
         self.title_text.draw()
+        self.high_score_text.draw()
+        self.profile_text.draw()
         self.prompt_text.draw()
         self.controls_text.draw()
+        if self.entering_name:
+            arcade.draw_lbwh_rectangle_filled(120, 310, WINDOW_WIDTH - 240, 100, panel_color)
+            self.name_prompt_text.draw()
 
     def on_key_press(self, key, modifiers):
+        if self.entering_name:
+            self._handle_name_input_key(key)
+            return
+
         if key == arcade.key.SPACE:
             self.window.show_view(GameView())
         elif key == arcade.key.Q:
             self.window.close()
+        elif key == arcade.key.N:
+            self._start_name_input()
+        elif key == arcade.key.H:
+            self.window.show_view(HighScoreView())
+
+    def on_text(self, text):
+        if not self.entering_name:
+            return
+        for ch in text:
+            if len(self.name_buffer) >= MAX_PROFILE_NAME_LENGTH:
+                break
+            if ch.isprintable() and (ch.isalnum() or ch == " "):
+                self.name_buffer += ch
+        self._refresh_name_prompt()
+
+    def _start_name_input(self):
+        self.entering_name = True
+        self.name_buffer = ""
+        self._refresh_name_prompt()
+
+    def _refresh_name_prompt(self):
+        self.name_prompt_text.text = (
+            f"Enter name (Enter to confirm, Esc to cancel):\n{self.name_buffer}_"
+        )
+
+    def _handle_name_input_key(self, key):
+        if key == arcade.key.ESCAPE:
+            self.entering_name = False
+        elif key == arcade.key.ENTER or key == arcade.key.RETURN:
+            name = self.name_buffer.strip()
+            if name:
+                store = self.window.score_store
+                store.current_profile = name
+                store.save()
+                self.profile_text.text = f"PROFILE: {name}"
+                self.high_score_text.text = f"HIGH SCORE: {store.all_time_best()}"
+            self.entering_name = False
+        elif key == arcade.key.BACKSPACE:
+            self.name_buffer = self.name_buffer[:-1]
+            self._refresh_name_prompt()
+
+
+class HighScoreView(arcade.View):
+    """ List of top scores across all profiles. """
+
+    def __init__(self):
+        super().__init__()
+        self.title_text = arcade.Text(
+            "HIGH SCORES",
+            x=WINDOW_WIDTH // 2,
+            y=WINDOW_HEIGHT - 60,
+            color=arcade.color.GOLD,
+            font_size=42,
+            anchor_x="center",
+            anchor_y="center",
+        )
+        self.entries_text = arcade.Text(
+            "",
+            x=WINDOW_WIDTH // 2,
+            y=WINDOW_HEIGHT // 2,
+            color=arcade.color.WHITE,
+            font_size=20,
+            anchor_x="center",
+            anchor_y="center",
+            multiline=True,
+            width=WINDOW_WIDTH - 80,
+            align="center",
+        )
+        self.back_text = arcade.Text(
+            "Press Esc to return",
+            x=WINDOW_WIDTH // 2,
+            y=40,
+            color=arcade.color.WHITE,
+            font_size=18,
+            anchor_x="center",
+            anchor_y="center",
+        )
+
+    def on_show_view(self):
+        store = self.window.score_store
+        top = store.top_scores(n=10)
+        if not top:
+            self.entries_text.text = "No scores yet — go play!"
+            return
+
+        lines = []
+        for rank, entry in enumerate(top, 1):
+            date = entry.get("timestamp", "")[:10]
+            lines.append(f"{rank:2d}.  {entry['profile']}  —  {entry['score']}  ({date})")
+        self.entries_text.text = "\n".join(lines)
+
+    def on_draw(self):
+        self.clear()
+        self.title_text.draw()
+        self.entries_text.draw()
+        self.back_text.draw()
+
+    def on_key_press(self, key, modifiers):
+        if key == arcade.key.ESCAPE:
+            self.window.show_view(TitleView())
 
 
 class GameView(arcade.View):
@@ -336,7 +496,9 @@ class GameView(arcade.View):
     def on_key_press(self, key, modifiers):
         """ Called whenever a key is pressed. """
         if self.is_game_over:
-            if key == arcade.key.SPACE:
+            # Deliberately ignore SPACE here — players are usually still flapping
+            # when they die and would otherwise blow past the game-over screen.
+            if key == arcade.key.ENTER or key == arcade.key.RETURN:
                 self.window.show_view(GameView())
             elif key == arcade.key.R:
                 self.window.show_view(TitleView())
@@ -457,11 +619,30 @@ class GameView(arcade.View):
             self.game_over()
 
     def game_over(self):
+        # Idempotent — collision and out-of-bounds checks can both fire on the
+        # same frame, but we should only record one score and play one sound.
+        if self.is_game_over:
+            return
         self.is_game_over = True
+
+        store = getattr(self.window, "score_store", None)
+        profile = store.current_profile if store else DEFAULT_PROFILE
+        previous_best = store.personal_best(profile) if store else 0
+        if store:
+            store.record(profile, self.score)
+            store.save()
+
+        new_best = max(previous_best, self.score)
+        is_new_record = self.score > previous_best and self.score > 0
+        best_line = f"Personal best: {new_best}"
+        if is_new_record:
+            best_line += "  ★ NEW!"
+
         self.game_over_text.text = (
             f"GAME OVER\n"
             f"Final score: {self.score}\n"
-            f"Press SPACE to play again\n"
+            f"{best_line}\n"
+            f"Press ENTER to play again\n"
             f"Press R for title\n"
             f"Press Q to quit"
         )
@@ -834,8 +1015,10 @@ class GameView(arcade.View):
 
 def main():
     """ Main method """
+    score_store = ScoreStore.load(SCORES_PATH)
     window = arcade.Window(WINDOW_WIDTH, WINDOW_HEIGHT, WINDOW_TITLE)
     window.background_color = arcade.color.SKY_BLUE
+    window.score_store = score_store
     window.show_view(TitleView())
     arcade.run()
 

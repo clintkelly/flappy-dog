@@ -8,3 +8,9 @@ wheels/
 
 # Virtual environments
 .venv
+
+# Local game state
+scores.json
+
+# Tooling caches
+.pytest_cache/
