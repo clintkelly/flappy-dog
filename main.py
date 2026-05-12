@@ -379,6 +379,11 @@ class GameView(arcade.View):
         self.player_sprite.center_y += self.player_sprite.change_y
         self.player_sprite.center_x += self.player_sprite.change_x
 
+        # Clamp at the top of the screen — flying off the top no longer kills.
+        if self.player_sprite.top > WINDOW_HEIGHT:
+            self.player_sprite.top = WINDOW_HEIGHT
+            self.player_sprite.change_y = 0
+
         # Cycle through the animation frames
         self.animation_time += delta_time
         if self.animation_time >= PLAYER_ANIMATION_FRAME_DURATION:
@@ -445,7 +450,7 @@ class GameView(arcade.View):
             arcade.play_sound(self.ring_sound, speed=pitch)
             ring.remove_from_sprite_lists()
 
-        if self.player_sprite.bottom < 0 or self.player_sprite.top > WINDOW_HEIGHT:
+        if self.player_sprite.bottom < 0:
             self.game_over()
 
     def game_over(self):
