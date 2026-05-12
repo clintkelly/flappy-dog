@@ -192,6 +192,28 @@ THUNDER_DELAY_MIN = 0.4             # delay between flash and the thunder clap
 THUNDER_DELAY_MAX = 1.1
 THUNDER_VOLUME = 0.8
 
+# Wind gust corridors — visible vertical columns of falling air that spawn
+# during storms. The rectangle scrolls left with the world; the lines inside
+# drift DOWNWARD to telegraph the downdraft force.
+GUST_SCROLL_SPEED = 3               # px/frame — matches PIPE_SPEED so it travels with the world
+GUST_WIDTH_MIN = 180                # narrower than tall — reads as a column
+GUST_WIDTH_MAX = 300
+GUST_HEIGHT_MIN = 320
+GUST_HEIGHT_MAX = 500
+GUST_Y_MARGIN = 60                  # don't spawn flush against the top or bottom
+GUST_SPAWN_INTERVAL_MIN = 5.0
+GUST_SPAWN_INTERVAL_MAX = 11.0
+GUST_DOWNDRAFT = 0.35               # added to change_y per frame inside a gust (gravity is 0.6)
+GUST_LINE_COUNT = 8                 # horizontal stripes visible inside the column
+GUST_LINE_COLOR = (255, 255, 255, 235)
+GUST_LINE_THICKNESS = 3
+GUST_BACKDROP_COLOR = (210, 230, 255, 80)  # faint blue tint so the corridor is obvious
+GUST_WAVE_AMPLITUDE = 7
+GUST_WAVE_FREQUENCY = 0.03
+GUST_WAVE_SPEED = 5.0               # wave-wobble rate (radians/sec)
+GUST_FLOW_SPEED = 360               # px/sec — speed the stripes drift downward (faster = more
+                                    # visibly "this is wind blowing DOWN")
+
 # Collectible coins placed in a row between obstacle spawns.
 COIN_SCALE = 1.5                   # 64 native -> 96 rendered
 COIN_ANIMATION_FRAME_DURATION = 0.06
@@ -261,13 +283,63 @@ class RainSystem:
         arcade.draw_lines(points, RAIN_COLOR, RAIN_THICKNESS)
 
 
+class WindGust:
+    """ A vertical wind column that scrolls left across the screen during storms.
+    Horizontal stripes inside the column drift downward to visually telegraph
+    the downdraft. While the bird is inside, a sustained downward force adds
+    to its change_y each frame. Visuals are procedural — no asset. """
+
+    def __init__(self, left, bottom, width, height):
+        self.left = left
+        self.bottom = bottom
+        self.width = width
+        self.height = height
+        self.phase = random.uniform(0, 2 * math.pi)
+        # Stripe-flow offset accumulates downward motion of the air inside the box.
+        self.flow_offset = random.uniform(0, height)
+
+    def update(self, delta_time):
+        self.left -= GUST_SCROLL_SPEED
+        self.phase += GUST_WAVE_SPEED * delta_time
+        # Stripes drift downward continuously, wrapping through the column.
+        self.flow_offset = (self.flow_offset + GUST_FLOW_SPEED * delta_time) % self.height
+
+    def is_off_screen(self):
+        return self.left + self.width < 0
+
+    def contains(self, x, y):
+        return (self.left <= x <= self.left + self.width
+                and self.bottom <= y <= self.bottom + self.height)
+
+    def draw(self):
+        # Faint backdrop tint so the corridor edges are obvious even at a glance.
+        arcade.draw_lbwh_rectangle_filled(
+            self.left, self.bottom, self.width, self.height, GUST_BACKDROP_COLOR,
+        )
+        # Horizontal stripes spaced evenly through the column height, all drifting
+        # downward by `flow_offset` so the air visibly flows down.
+        spacing = self.height / GUST_LINE_COUNT
+        top = self.bottom + self.height
+        for i in range(GUST_LINE_COUNT):
+            # Each stripe wraps independently; offset cycles through [0, height).
+            offset = (i * spacing + self.flow_offset) % self.height
+            y_base = top - offset
+            points = []
+            x = 0
+            while x <= self.width:
+                wave = math.sin(x * GUST_WAVE_FREQUENCY + self.phase + i * 0.6) * GUST_WAVE_AMPLITUDE
+                points.append((self.left + x, y_base + wave))
+                x += 16
+            arcade.draw_line_strip(points, GUST_LINE_COLOR, GUST_LINE_THICKNESS)
+
+
 class WeatherController:
     """ State machine cycling clear ↔ storm with lightning + thunder events.
 
     States:
         CLEAR      no rain, no flashes; waiting for the next storm to roll in
         ONSET      lightning flash → thunder → rain starts (transition into storm)
-        STORM      rain falling + periodic lightning/thunder pairs
+        STORM      rain falling + periodic lightning/thunder pairs + wind gusts
     """
 
     CLEAR = "clear"
@@ -292,6 +364,10 @@ class WeatherController:
         self.time_until_lightning = 0.0
         # Delayed thunder fires this many seconds after its flash.
         self.pending_thunder_in = None
+
+        # Wind gusts (corridors that downdraft the bird while overlapping).
+        self.gusts: list[WindGust] = []
+        self.time_until_next_gust = float("inf")  # no gusts until a storm is active
 
         # Flash overlay state.
         self.flash_alpha = 0.0
@@ -318,6 +394,13 @@ class WeatherController:
                     arcade.play_sound(self.thunder_sound, volume=THUNDER_VOLUME)
                 self.pending_thunder_in = None
 
+        # Active gusts continue to scroll and cull regardless of weather state,
+        # so a gust spawned at the end of a storm still finishes its travel.
+        for gust in self.gusts[:]:
+            gust.update(delta_time)
+            if gust.is_off_screen():
+                self.gusts.remove(gust)
+
         if self.state == self.CLEAR:
             self.time_until_next_storm -= delta_time
             if self.time_until_next_storm <= 0:
@@ -330,6 +413,9 @@ class WeatherController:
             self.time_until_lightning -= delta_time
             if self.time_until_lightning <= 0:
                 self._trigger_lightning()
+            self.time_until_next_gust -= delta_time
+            if self.time_until_next_gust <= 0:
+                self._spawn_gust()
             if self.storm_time_left <= 0:
                 self._end_storm()
 
@@ -338,11 +424,21 @@ class WeatherController:
         # we're still in the flash/thunder pre-roll and rain hasn't begun yet.
         if self.state == self.STORM:
             self.rain.draw()
+        for gust in self.gusts:
+            gust.draw()
         if self.flash_alpha > 0:
             arcade.draw_lbwh_rectangle_filled(
                 0, 0, WINDOW_WIDTH, WINDOW_HEIGHT,
                 (255, 255, 255, int(self.flash_alpha)),
             )
+
+    def force_at(self, x, y):
+        """ Sum of wind forces (fx, fy) from any gusts containing the point. """
+        fx, fy = 0.0, 0.0
+        for gust in self.gusts:
+            if gust.contains(x, y):
+                fy -= GUST_DOWNDRAFT
+        return fx, fy
 
     # ----- transitions -----
 
@@ -369,14 +465,24 @@ class WeatherController:
             # periodic cadence right away rather than waiting for the long
             # randomized interval.
             self.time_until_lightning = random.uniform(LIGHTNING_FIRST_DELAY_MIN, LIGHTNING_FIRST_DELAY_MAX)
+            self.time_until_next_gust = random.uniform(GUST_SPAWN_INTERVAL_MIN, GUST_SPAWN_INTERVAL_MAX)
             self._start_rain_loop()
 
     def _end_storm(self):
         self.state = self.CLEAR
         self.time_until_next_storm = random.uniform(STORM_INTERVAL_MIN, STORM_INTERVAL_MAX)
+        self.time_until_next_gust = float("inf")  # stop spawning new gusts
         if self.rain_player is not None:
             arcade.stop_sound(self.rain_player)
             self.rain_player = None
+
+    def _spawn_gust(self):
+        width = random.randint(GUST_WIDTH_MIN, GUST_WIDTH_MAX)
+        height = random.randint(GUST_HEIGHT_MIN, GUST_HEIGHT_MAX)
+        bottom = random.randint(GUST_Y_MARGIN, WINDOW_HEIGHT - GUST_Y_MARGIN - height)
+        # Spawn just off the right edge so it scrolls into view.
+        self.gusts.append(WindGust(WINDOW_WIDTH, bottom, width, height))
+        self.time_until_next_gust = random.uniform(GUST_SPAWN_INTERVAL_MIN, GUST_SPAWN_INTERVAL_MAX)
 
     def _trigger_lightning(self):
         self._flash()
@@ -984,6 +1090,10 @@ class GameView(arcade.View):
             return
 
         self.player_sprite.change_y -= GRAVITY
+        # Wind gusts push the bird (downdraft) while it's inside their corridor.
+        fx, fy = self.weather.force_at(self.player_sprite.center_x, self.player_sprite.center_y)
+        self.player_sprite.change_x += fx
+        self.player_sprite.change_y += fy
         self.player_sprite.center_y += self.player_sprite.change_y
         self.player_sprite.center_x += self.player_sprite.change_x
 
