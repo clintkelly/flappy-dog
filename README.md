@@ -42,7 +42,9 @@ Press `P` any time during play to freeze the screen (handy for screenshots) and 
 
 ## Weather
 
-The game runs with an always-on rain effect drawn over the world. Visuals are pure code (no assets needed). The rain *sound* is optional — drop a `rain.wav`, `rain.ogg`, or `rain.mp3` into [assets/](assets/) and it'll be loaded automatically and looped at low volume while the game is in play.
+The game cycles between clear weather and thunderstorms. Each storm starts with a full-screen lightning flash, a delayed thunder clap, and then rain falling in from above and the right. During the storm, periodic lightning + thunder events fire on a random interval, and the rain keeps streaming until the storm passes (typically 30–60 seconds). All visuals are pure code (no assets needed).
+
+The rain and thunder *sounds* are optional — drop `rain.{wav,ogg,mp3}` and/or `thunder.{wav,ogg,mp3}` into [assets/](assets/) and they'll be picked up automatically. The rain plays in a low-volume loop while a storm is active; thunder claps fire individually shortly after each lightning flash.
 
 ## Profiles and high scores
 

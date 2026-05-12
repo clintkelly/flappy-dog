@@ -151,8 +151,9 @@ FLOATING_TEXT_COLORS = (
     arcade.color.LIGHT_SKY_BLUE,
 )
 
-# Weather — always-on rain. Structured as a self-contained effect so a future
-# WeatherController can layer additional effects (snow, lightning, fog).
+# Weather. RainSystem is a self-contained falling-rain effect; WeatherController
+# composes it with a thunderstorm state machine (clear → storm-onset → storm → clear)
+# and a flash overlay for lightning.
 RAIN_DROP_COUNT = 220
 RAIN_FALL_SPEED = 12               # pixels per frame downward
 RAIN_WIND_SPEED = 18               # pixels per frame leftward — strong slant so it looks like
@@ -161,7 +162,27 @@ RAIN_LENGTH_X = 20
 RAIN_LENGTH_Y = 13
 RAIN_COLOR = (240, 250, 255, 230)  # RGBA — near-white, mostly opaque against the sky
 RAIN_THICKNESS = 2
-RAIN_SOUND_VOLUME = 0.3
+RAIN_SOUND_VOLUME = 0.5
+
+# Weather cycle timings (seconds). Tuned so a typical 30-90 second run sees at
+# least one full storm cycle.
+STORM_INTERVAL_MIN = 5.0            # delay before first storm + between storms
+STORM_INTERVAL_MAX = 18.0
+STORM_DURATION_MIN = 30.0
+STORM_DURATION_MAX = 60.0
+STORM_ONSET_FLASH_DELAY = 0.6       # flash → thunder
+STORM_ONSET_RAIN_DELAY = 1.4        # thunder → rain begins
+
+# Lightning + thunder
+LIGHTNING_FLASH_ALPHA = 230
+LIGHTNING_FLASH_DURATION = 0.25     # seconds for full-screen flash to fade to 0
+LIGHTNING_INTERVAL_MIN = 4.0        # seconds between lightning events during a storm
+LIGHTNING_INTERVAL_MAX = 9.0
+LIGHTNING_FIRST_DELAY_MIN = 2.0     # delay before the first in-storm lightning
+LIGHTNING_FIRST_DELAY_MAX = 4.5
+THUNDER_DELAY_MIN = 0.4             # delay between flash and the thunder clap
+THUNDER_DELAY_MAX = 1.1
+THUNDER_VOLUME = 0.8
 
 # Collectible coins placed in a row between obstacle spawns.
 COIN_SCALE = 1.5                   # 64 native -> 96 rendered
@@ -196,6 +217,17 @@ class RainSystem:
             for _ in range(count)
         ]
 
+    def reset_above_screen(self):
+        """ Move every drop above (and right of) the screen so that when a storm
+        begins the rain visibly falls in rather than appearing pre-populated. """
+        for drop in self.drops:
+            if random.random() < 0.5:
+                drop[0] = random.uniform(0, self.width + 200)
+                drop[1] = random.uniform(self.height, self.height + 500)
+            else:
+                drop[0] = random.uniform(self.width, self.width + 400)
+                drop[1] = random.uniform(0, self.height)
+
     def update(self, delta_time):
         for drop in self.drops:
             drop[0] -= RAIN_WIND_SPEED
@@ -219,6 +251,139 @@ class RainSystem:
             points.append((x, y))
             points.append((x - RAIN_LENGTH_X, y - RAIN_LENGTH_Y))
         arcade.draw_lines(points, RAIN_COLOR, RAIN_THICKNESS)
+
+
+class WeatherController:
+    """ State machine cycling clear ↔ storm with lightning + thunder events.
+
+    States:
+        CLEAR      no rain, no flashes; waiting for the next storm to roll in
+        ONSET      lightning flash → thunder → rain starts (transition into storm)
+        STORM      rain falling + periodic lightning/thunder pairs
+    """
+
+    CLEAR = "clear"
+    ONSET = "onset"
+    STORM = "storm"
+
+    def __init__(self, rain_sound=None, thunder_sound=None):
+        self.rain = RainSystem()
+        self.rain_sound = rain_sound
+        self.thunder_sound = thunder_sound
+        self.rain_player = None
+
+        self.state = self.CLEAR
+        self.time_until_next_storm = random.uniform(STORM_INTERVAL_MIN, STORM_INTERVAL_MAX)
+        self.storm_time_left = 0.0
+
+        # ONSET sub-stage timers: 0=flash phase, 1=post-thunder wait, 2=transition to STORM.
+        self.onset_stage = 0
+        self.onset_timer = 0.0
+
+        # During STORM, time until next lightning event.
+        self.time_until_lightning = 0.0
+        # Delayed thunder fires this many seconds after its flash.
+        self.pending_thunder_in = None
+
+        # Flash overlay state.
+        self.flash_alpha = 0.0
+        self.flash_decay_per_second = LIGHTNING_FLASH_ALPHA / LIGHTNING_FLASH_DURATION
+
+    # ----- lifecycle -----
+
+    def shutdown(self):
+        """ Stop the rain loop. Call from on_hide_view. """
+        if self.rain_player is not None:
+            arcade.stop_sound(self.rain_player)
+            self.rain_player = None
+
+    def update(self, delta_time):
+        # Flash always decays regardless of state.
+        if self.flash_alpha > 0:
+            self.flash_alpha = max(0.0, self.flash_alpha - self.flash_decay_per_second * delta_time)
+
+        # Delayed thunder fires regardless of state — it was scheduled at flash time.
+        if self.pending_thunder_in is not None:
+            self.pending_thunder_in -= delta_time
+            if self.pending_thunder_in <= 0:
+                if self.thunder_sound:
+                    arcade.play_sound(self.thunder_sound, volume=THUNDER_VOLUME)
+                self.pending_thunder_in = None
+
+        if self.state == self.CLEAR:
+            self.time_until_next_storm -= delta_time
+            if self.time_until_next_storm <= 0:
+                self._begin_onset()
+        elif self.state == self.ONSET:
+            self._update_onset(delta_time)
+        elif self.state == self.STORM:
+            self.rain.update(delta_time)
+            self.storm_time_left -= delta_time
+            self.time_until_lightning -= delta_time
+            if self.time_until_lightning <= 0:
+                self._trigger_lightning()
+            if self.storm_time_left <= 0:
+                self._end_storm()
+
+    def draw(self):
+        # Rain is only visible once the storm is fully underway — during ONSET
+        # we're still in the flash/thunder pre-roll and rain hasn't begun yet.
+        if self.state == self.STORM:
+            self.rain.draw()
+        if self.flash_alpha > 0:
+            arcade.draw_lbwh_rectangle_filled(
+                0, 0, WINDOW_WIDTH, WINDOW_HEIGHT,
+                (255, 255, 255, int(self.flash_alpha)),
+            )
+
+    # ----- transitions -----
+
+    def _begin_onset(self):
+        self.state = self.ONSET
+        self.onset_stage = 0
+        self.onset_timer = 0.0
+        self.rain.reset_above_screen()
+        self._flash()
+        # Schedule thunder some time after the flash.
+        self.pending_thunder_in = STORM_ONSET_FLASH_DELAY
+
+    def _update_onset(self, delta_time):
+        self.onset_timer += delta_time
+        if self.onset_stage == 0 and self.onset_timer >= STORM_ONSET_FLASH_DELAY:
+            self.onset_stage = 1
+            self.onset_timer = 0.0
+        elif self.onset_stage == 1 and self.onset_timer >= STORM_ONSET_RAIN_DELAY:
+            # Transition into the steady storm — start rain sound and visuals.
+            self.onset_stage = 2
+            self.state = self.STORM
+            self.storm_time_left = random.uniform(STORM_DURATION_MIN, STORM_DURATION_MAX)
+            # The *first* in-storm lightning fires sooner so the player sees the
+            # periodic cadence right away rather than waiting for the long
+            # randomized interval.
+            self.time_until_lightning = random.uniform(LIGHTNING_FIRST_DELAY_MIN, LIGHTNING_FIRST_DELAY_MAX)
+            self._start_rain_loop()
+
+    def _end_storm(self):
+        self.state = self.CLEAR
+        self.time_until_next_storm = random.uniform(STORM_INTERVAL_MIN, STORM_INTERVAL_MAX)
+        if self.rain_player is not None:
+            arcade.stop_sound(self.rain_player)
+            self.rain_player = None
+
+    def _trigger_lightning(self):
+        self._flash()
+        if self.thunder_sound:
+            self.pending_thunder_in = random.uniform(THUNDER_DELAY_MIN, THUNDER_DELAY_MAX)
+        self.time_until_lightning = random.uniform(LIGHTNING_INTERVAL_MIN, LIGHTNING_INTERVAL_MAX)
+
+    def _flash(self):
+        self.flash_alpha = float(LIGHTNING_FLASH_ALPHA)
+
+    def _start_rain_loop(self):
+        if self.rain_sound is not None and self.rain_player is None:
+            self.rain_player = arcade.play_sound(
+                self.rain_sound, volume=RAIN_SOUND_VOLUME, loop=True,
+            )
 
 
 class TitleView(arcade.View):
@@ -654,14 +819,20 @@ class GameView(arcade.View):
         self.coin_sound = arcade.load_sound(":resources:sounds/coin1.wav")
         self.ring_sound = arcade.load_sound(":resources:sounds/upgrade1.wav")
 
-        # Ambient rain — sound is optional; drop assets/rain.{wav,ogg,mp3} in
-        # to enable it. Visuals come up either way.
-        rain_paths = list(ASSET_DIR.glob("rain.wav")) \
-            + list(ASSET_DIR.glob("rain.ogg")) \
-            + list(ASSET_DIR.glob("rain.mp3"))
-        self.rain_sound = arcade.load_sound(rain_paths[0]) if rain_paths else None
-        self.rain_player = None
-        self.rain = RainSystem()
+        # Weather: rain + thunderstorm cycle. Both sound files are optional;
+        # drop assets/rain.{wav,ogg,mp3} and/or assets/thunder.{wav,ogg,mp3}
+        # into the assets dir to enable them. Visuals come up either way.
+        def _load_optional(stem):
+            for ext in ("wav", "ogg", "mp3"):
+                hits = list(ASSET_DIR.glob(f"{stem}.{ext}"))
+                if hits:
+                    return arcade.load_sound(hits[0])
+            return None
+
+        self.weather = WeatherController(
+            rain_sound=_load_optional("rain"),
+            thunder_sound=_load_optional("thunder"),
+        )
 
         self.gui_camera = None
         self.score = 0
@@ -787,25 +958,20 @@ class GameView(arcade.View):
             self.moving_horizontally = False
 
 
-    def on_show_view(self):
-        # Start the rain loop when this view becomes active.
-        if self.rain_sound is not None and self.rain_player is None:
-            self.rain_player = arcade.play_sound(
-                self.rain_sound, volume=RAIN_SOUND_VOLUME, loop=True,
-            )
-
     def on_hide_view(self):
-        if self.rain_player is not None:
-            arcade.stop_sound(self.rain_player)
-            self.rain_player = None
+        # Stop any active rain loop when leaving GameView (replay / back to title).
+        self.weather.shutdown()
 
     def on_update(self, delta_time):
         """ Movement and game logic """
-        # Weather keeps going regardless of pause/game-over so the world still
-        # feels alive on the frozen screen.
-        self.rain.update(delta_time)
+        if self.is_paused:
+            return
 
-        if self.is_game_over or self.is_paused:
+        # Weather keeps cycling during game-over so the world still feels alive
+        # on the frozen screen — but freeze entirely while paused.
+        self.weather.update(delta_time)
+
+        if self.is_game_over:
             return
 
         self.player_sprite.change_y -= GRAVITY
@@ -1338,9 +1504,10 @@ class GameView(arcade.View):
         self.gui_camera.use()
         arcade.draw_sprite(self.sky_sprite)
         self.scene.draw()
-        # Rain sits in front of the game world (camera-lens style) but behind
-        # the HUD so floating text and the score remain legible.
-        self.rain.draw()
+        # Weather sits in front of the game world (camera-lens style) — rain
+        # plus any active lightning flash overlay — but behind the HUD so
+        # floating text and the score remain legible.
+        self.weather.draw()
         for text in self.floating_texts:
             text.draw()
         self.score_text.draw()
