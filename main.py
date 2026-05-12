@@ -151,6 +151,18 @@ FLOATING_TEXT_COLORS = (
     arcade.color.LIGHT_SKY_BLUE,
 )
 
+# Weather — always-on rain. Structured as a self-contained effect so a future
+# WeatherController can layer additional effects (snow, lightning, fog).
+RAIN_DROP_COUNT = 220
+RAIN_FALL_SPEED = 12               # pixels per frame downward
+RAIN_WIND_SPEED = 18               # pixels per frame leftward — strong slant so it looks like
+                                    # the bird is flying *into* the rain
+RAIN_LENGTH_X = 20
+RAIN_LENGTH_Y = 13
+RAIN_COLOR = (240, 250, 255, 230)  # RGBA — near-white, mostly opaque against the sky
+RAIN_THICKNESS = 2
+RAIN_SOUND_VOLUME = 0.3
+
 # Collectible coins placed in a row between obstacle spawns.
 COIN_SCALE = 1.5                   # 64 native -> 96 rendered
 COIN_ANIMATION_FRAME_DURATION = 0.06
@@ -164,6 +176,49 @@ COIN_PARTICLES_PER_BURST = 8
 
 def lerp(a, b, t):
     return a + (b - a) * t
+
+
+class RainSystem:
+    """ Always-on falling-rain effect, drawn on top of the game world.
+
+    Pure code, no sprites — each frame a batch of disconnected line segments
+    is drawn via arcade.draw_lines (one GL call). Designed as a stand-alone
+    effect so a future WeatherController can compose it with snow, lightning,
+    fog etc. without changes here.
+    """
+
+    def __init__(self, count=RAIN_DROP_COUNT, width=WINDOW_WIDTH, height=WINDOW_HEIGHT):
+        self.width = width
+        self.height = height
+        # Lists-of-lists so we can mutate (x, y) in place each frame.
+        self.drops = [
+            [random.uniform(0, width), random.uniform(0, height)]
+            for _ in range(count)
+        ]
+
+    def update(self, delta_time):
+        for drop in self.drops:
+            drop[0] -= RAIN_WIND_SPEED
+            drop[1] -= RAIN_FALL_SPEED
+            if drop[0] < 0 or drop[1] < 0:
+                # Recycle from either the top edge OR the right edge so the
+                # right side stays populated despite the strong leftward wind.
+                # 50/50 split is close enough to the actual edge-inflow ratio.
+                if random.random() < 0.5:
+                    drop[0] = random.uniform(0, self.width)
+                    drop[1] = random.uniform(self.height, self.height + 200)
+                else:
+                    drop[0] = random.uniform(self.width, self.width + 200)
+                    drop[1] = random.uniform(0, self.height)
+
+    def draw(self):
+        # arcade.draw_lines takes a flat list of (x, y) pairs treated as
+        # alternating start/end points — one batched GL call for all drops.
+        points = []
+        for x, y in self.drops:
+            points.append((x, y))
+            points.append((x - RAIN_LENGTH_X, y - RAIN_LENGTH_Y))
+        arcade.draw_lines(points, RAIN_COLOR, RAIN_THICKNESS)
 
 
 class TitleView(arcade.View):
@@ -599,6 +654,15 @@ class GameView(arcade.View):
         self.coin_sound = arcade.load_sound(":resources:sounds/coin1.wav")
         self.ring_sound = arcade.load_sound(":resources:sounds/upgrade1.wav")
 
+        # Ambient rain — sound is optional; drop assets/rain.{wav,ogg,mp3} in
+        # to enable it. Visuals come up either way.
+        rain_paths = list(ASSET_DIR.glob("rain.wav")) \
+            + list(ASSET_DIR.glob("rain.ogg")) \
+            + list(ASSET_DIR.glob("rain.mp3"))
+        self.rain_sound = arcade.load_sound(rain_paths[0]) if rain_paths else None
+        self.rain_player = None
+        self.rain = RainSystem()
+
         self.gui_camera = None
         self.score = 0
         self.score_text = None
@@ -723,8 +787,24 @@ class GameView(arcade.View):
             self.moving_horizontally = False
 
 
+    def on_show_view(self):
+        # Start the rain loop when this view becomes active.
+        if self.rain_sound is not None and self.rain_player is None:
+            self.rain_player = arcade.play_sound(
+                self.rain_sound, volume=RAIN_SOUND_VOLUME, loop=True,
+            )
+
+    def on_hide_view(self):
+        if self.rain_player is not None:
+            arcade.stop_sound(self.rain_player)
+            self.rain_player = None
+
     def on_update(self, delta_time):
         """ Movement and game logic """
+        # Weather keeps going regardless of pause/game-over so the world still
+        # feels alive on the frozen screen.
+        self.rain.update(delta_time)
+
         if self.is_game_over or self.is_paused:
             return
 
@@ -1258,6 +1338,9 @@ class GameView(arcade.View):
         self.gui_camera.use()
         arcade.draw_sprite(self.sky_sprite)
         self.scene.draw()
+        # Rain sits in front of the game world (camera-lens style) but behind
+        # the HUD so floating text and the score remain legible.
+        self.rain.draw()
         for text in self.floating_texts:
             text.draw()
         self.score_text.draw()

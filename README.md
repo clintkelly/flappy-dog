@@ -40,6 +40,10 @@ The game ramps in difficulty as your score climbs: column gaps shrink and column
 
 Press `P` any time during play to freeze the screen (handy for screenshots) and `Space` or `P` to resume.
 
+## Weather
+
+The game runs with an always-on rain effect drawn over the world. Visuals are pure code (no assets needed). The rain *sound* is optional — drop a `rain.wav`, `rain.ogg`, or `rain.mp3` into [assets/](assets/) and it'll be loaded automatically and looped at low volume while the game is in play.
+
 ## Profiles and high scores
 
 Every finished run is appended to `scores.json` in the project root, tagged with the current profile name. The title screen shows the all-time high score and the active profile; press `N` to open the profile picker (cycle through existing profiles with ↑/↓, `Enter` to select, or pick the `+ Add new profile…` row to type a new name), and `H` to view the top-10 leaderboard across all profiles. After each death, the game-over screen shows your personal best (with a `★ NEW!` flag when you set a new one).
