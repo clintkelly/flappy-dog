@@ -87,6 +87,48 @@ BOULDER_AMPLITUDE_MAX = 160
 BOULDER_PHASE_SPEED_MIN = 1.5   # radians/sec
 BOULDER_PHASE_SPEED_MAX = 2.5
 
+# Oscillating column pairs — gap slides up/down while the column scrolls.
+# Roll fires only when the boulder roll missed. ~0.25 -> 20% of all spawns.
+OSCILLATING_PIPE_CHANCE = 0.25
+PIPE_AMPLITUDE_MIN = 60
+PIPE_AMPLITUDE_MAX = 120
+PIPE_PHASE_SPEED_MIN = 0.8      # radians/sec — slower than boulders since the gap is the target
+PIPE_PHASE_SPEED_MAX = 1.6
+
+# Collectible bonus rings — non-fatal pickups that grant points.
+RING_OBSTACLE_CHANCE = 0.20
+RING_SCALE = 3
+RING_BASE_Y_MIN = 240
+RING_BASE_Y_MAX = WINDOW_HEIGHT - 240
+RING_AMPLITUDE_MIN = 60
+RING_AMPLITUDE_MAX = 140
+RING_PHASE_SPEED_MIN = 1.0
+RING_PHASE_SPEED_MAX = 2.0
+RING_POINTS = 2
+RING_ANIMATION_FRAME_DURATION = 0.05  # seconds per frame for the ring spin
+RING_COMBO_BONUS_STEP = 1     # extra points added per consecutive ring beyond the first
+RING_PITCH_STEP = 0.06        # play_sound speed delta per consecutive ring
+RING_PITCH_MAX = 1.9          # cap so the chime doesn't go cartoonish
+
+# Ring-collection particle burst (code-only — uses SpriteCircle).
+PARTICLES_PER_BURST = 12
+PARTICLE_LIFETIME = 0.5            # seconds
+PARTICLE_SPEED_MIN = 2.0           # pixels per frame
+PARTICLE_SPEED_MAX = 6.0
+PARTICLE_GRAVITY = 0.2
+PARTICLE_RADIUS_MIN = 3
+PARTICLE_RADIUS_MAX = 6
+PARTICLE_COLORS = (
+    arcade.color.GOLD,
+    arcade.color.ORANGE,
+    arcade.color.YELLOW,
+    arcade.color.WHITE,
+)
+
+# Floating "+N" text shown when a ring is collected.
+FLOATING_TEXT_LIFETIME = 1.0       # seconds
+FLOATING_TEXT_RISE_SPEED = 1.5     # pixels per frame
+
 
 def lerp(a, b, t):
     return a + (b - a) * t
@@ -182,6 +224,13 @@ class GameView(arcade.View):
             for p in sorted(ASSET_DIR.glob("boulder*.png"))
         ]
 
+        # Rings are named ring1.png .. ring16.png — sort numerically so the spin animates smoothly.
+        ring_paths = sorted(
+            ASSET_DIR.glob("ring*.png"),
+            key=lambda p: int(p.stem.replace("ring", "")),
+        )
+        self.ring_textures = [arcade.load_texture(p) for p in ring_paths]
+
         self.cloud_textures = [
             arcade.load_texture(p)
             for p in sorted(ASSET_DIR.glob("cloud*.png"))
@@ -200,6 +249,7 @@ class GameView(arcade.View):
         self.jump_sound = arcade.load_sound(":resources:sounds/jump1.wav")
         self.gameover_sound = arcade.load_sound(":resources:sounds/gameover1.wav")
         self.coin_sound = arcade.load_sound(":resources:sounds/coin1.wav")
+        self.ring_sound = arcade.load_sound(":resources:sounds/upgrade1.wav")
 
         self.gui_camera = None
         self.score = 0
@@ -218,6 +268,9 @@ class GameView(arcade.View):
 
         self.animation_frame = 0
         self.animation_time = 0.0
+        self.ring_animation_frame = 0
+        self.ring_animation_time = 0.0
+        self.ring_combo = 0
 
         self.gui_camera = arcade.Camera2D()
 
@@ -266,7 +319,10 @@ class GameView(arcade.View):
         self.scene.add_sprite("Player", self.player_sprite)
         self.scene.add_sprite_list("Pipes")
         self.scene.add_sprite_list("Boulders")
+        self.scene.add_sprite_list("Rings")
         self.scene.add_sprite_list("ScoreZones")
+        self.scene.add_sprite_list("Particles")
+        self.floating_texts = []
 
         self.player_sprite.change_y = 0
         self.moving_horizontally = False
@@ -342,8 +398,11 @@ class GameView(arcade.View):
             self.player_sprite.center_x = PLAYER_MAX_X
 
         # Move and remove existing pipes
-        self.move_and_remove_existing_pipes()
+        self.move_and_remove_existing_pipes(delta_time)
         self.move_boulders(delta_time)
+        self.move_rings(delta_time)
+        self.update_particles(delta_time)
+        self.update_floating_texts(delta_time)
 
         # Spawn new pipes
         self.spawn_pipes()
@@ -371,6 +430,21 @@ class GameView(arcade.View):
             self.score_text.text = f"Score: {self.score}"
             arcade.play_sound(self.coin_sound)
 
+        ring_hits = arcade.check_for_collision_with_list(
+            self.player_sprite,
+            self.scene["Rings"],
+        )
+        for ring in ring_hits:
+            self.spawn_ring_burst(ring.center_x, ring.center_y)
+            self.ring_combo += 1
+            bonus = RING_POINTS + (self.ring_combo - 1) * RING_COMBO_BONUS_STEP
+            self.score += bonus
+            self.score_text.text = f"Score: {self.score}"
+            self.spawn_floating_text(ring.center_x, ring.center_y, f"+{bonus}")
+            pitch = min(1.0 + (self.ring_combo - 1) * RING_PITCH_STEP, RING_PITCH_MAX)
+            arcade.play_sound(self.ring_sound, speed=pitch)
+            ring.remove_from_sprite_lists()
+
         if self.player_sprite.bottom < 0 or self.player_sprite.top > WINDOW_HEIGHT:
             self.game_over()
 
@@ -387,10 +461,10 @@ class GameView(arcade.View):
 
 
     def should_generate_new_pipe(self):
-        # Look at the rightmost sprite across pipes AND boulders so spacing is
+        # Look at the rightmost sprite across all spawnable slots so spacing is
         # consistent regardless of which kind was spawned last.
         last_x = -float("inf")
-        for list_name in ("Pipes", "Boulders"):
+        for list_name in ("Pipes", "Boulders", "Rings"):
             sprites = self.scene.get_sprite_list(list_name)
             if sprites:
                 last_x = max(last_x, sprites[-1].center_x)
@@ -398,8 +472,10 @@ class GameView(arcade.View):
             return True
         return last_x < WINDOW_WIDTH - self.next_pipe_spacing
 
-    def make_top_column(self, center_x, gap_top):
-        """ Column hanging from the ceiling. Cap sits flush above the gap; mid tiles stack upward. """
+    def make_top_column(self, center_x, gap_top, extend_for_oscillation=0):
+        """ Column hanging from the ceiling. Cap sits flush above the gap; mid tiles stack upward.
+        extend_for_oscillation pads the column past the screen edge so it still covers when the
+        gap slides downward. """
         tiles = []
 
         cap = arcade.Sprite(
@@ -412,8 +488,9 @@ class GameView(arcade.View):
 
         # Stack mid tiles above the cap until the column extends past the top of the screen.
         # Each tile overlaps the one below by COLUMN_TILE_VERTICAL_OVERLAP to hide art seams.
+        target_top = WINDOW_HEIGHT + extend_for_oscillation
         next_bottom = cap.top - COLUMN_TILE_VERTICAL_OVERLAP
-        while next_bottom < WINDOW_HEIGHT:
+        while next_bottom < target_top:
             mid = arcade.Sprite(
                 random.choice(self.column_mid_textures),
                 scale=COLUMN_TILE_SCALE,
@@ -425,8 +502,9 @@ class GameView(arcade.View):
 
         return tiles
 
-    def make_bottom_column(self, center_x, gap_bottom):
-        """ Column rising from the floor. Cap sits flush below the gap; mid tiles stack downward. """
+    def make_bottom_column(self, center_x, gap_bottom, extend_for_oscillation=0):
+        """ Column rising from the floor. Cap sits flush below the gap; mid tiles stack downward.
+        extend_for_oscillation pads past the bottom of the screen for oscillating gaps. """
         tiles = []
 
         cap = arcade.Sprite(
@@ -437,8 +515,9 @@ class GameView(arcade.View):
         cap.center_y = gap_bottom - COLUMN_TILE_RENDERED // 2
         tiles.append(cap)
 
+        target_bottom = -extend_for_oscillation
         next_top = cap.bottom + COLUMN_TILE_VERTICAL_OVERLAP
-        while next_top > 0:
+        while next_top > target_bottom:
             mid = arcade.Sprite(
                 random.choice(self.column_mid_textures),
                 scale=COLUMN_TILE_SCALE,
@@ -475,7 +554,19 @@ class GameView(arcade.View):
         # Spawn just off the right edge of the screen
         column_x = WINDOW_WIDTH + COLUMN_TILE_RENDERED // 2
 
-        if random.random() < BOULDER_OBSTACLE_CHANCE:
+        # Single roll picks ring / boulder / column-pair so probabilities don't compound.
+        roll = random.random()
+        if roll < RING_OBSTACLE_CHANCE:
+            # Bonus ring spawn (non-fatal pickup).
+            self.scene.add_sprite("Rings", self.make_ring(column_x))
+            # Use the existing spacing factor for the next spawn and bail.
+            self.next_pipe_spacing = random.randint(
+                int(MIN_PIPE_SPACING * spacing_factor),
+                int(MAX_PIPE_SPACING * spacing_factor),
+            )
+            return
+
+        if roll < RING_OBSTACLE_CHANCE + BOULDER_OBSTACLE_CHANCE:
             # Spawn a single oscillating boulder instead of a column pair.
             self.scene.add_sprite("Boulders", self.make_boulder(column_x))
             # Boulder score zone spans the full window height — the bird scores by clearing
@@ -490,19 +581,49 @@ class GameView(arcade.View):
             score_zone.visible = False
             self.scene.add_sprite("ScoreZones", score_zone)
         else:
-            # Existing column-pair spawn with gap-size difficulty scaling.
+            # Column pair (static or oscillating). Difficulty scaling applies in both cases.
             gap_factor = 1.0 + (GAP_RATIO_AT_MAX_DIFFICULTY - 1.0) * t
             gap_size = random.randint(
                 int(MIN_PIPE_CENTER_GAP * gap_factor),
                 int(MAX_PIPE_CENTER_GAP * gap_factor),
             )
-            gap_center = random.randint(MIN_PIPE_CENTER_GAP_Y, MAX_PIPE_CENTER_GAP_Y)
+
+            oscillating = random.random() < OSCILLATING_PIPE_CHANCE
+            if oscillating:
+                # Keep the gap center far enough from screen edges that the oscillation never
+                # pushes it off-screen.
+                gap_center = random.randint(
+                    MIN_PIPE_CENTER_GAP_Y + PIPE_AMPLITUDE_MAX,
+                    MAX_PIPE_CENTER_GAP_Y - PIPE_AMPLITUDE_MAX,
+                )
+                amplitude = random.randint(PIPE_AMPLITUDE_MIN, PIPE_AMPLITUDE_MAX)
+                phase = random.uniform(0, 2 * math.pi)
+                phase_speed = random.uniform(PIPE_PHASE_SPEED_MIN, PIPE_PHASE_SPEED_MAX)
+                extend = PIPE_AMPLITUDE_MAX
+            else:
+                gap_center = random.randint(MIN_PIPE_CENTER_GAP_Y, MAX_PIPE_CENTER_GAP_Y)
+                amplitude = 0
+                phase = 0
+                phase_speed = 0
+                extend = 0
+
             gap_top = gap_center + gap_size // 2
             gap_bottom = gap_center - gap_size // 2
 
-            top_tiles = self.make_top_column(column_x, gap_top)
-            bottom_tiles = self.make_bottom_column(column_x, gap_bottom)
+            top_tiles = self.make_top_column(column_x, gap_top, extend_for_oscillation=extend)
+            bottom_tiles = self.make_bottom_column(column_x, gap_bottom, extend_for_oscillation=extend)
             middle_pipe = self.make_middle_pipe(column_x, gap_center, gap_size)
+
+            sprites = top_tiles + bottom_tiles + [middle_pipe]
+            if oscillating:
+                # Attach oscillation attrs to every tile and the score zone so they move as one.
+                initial_offset = amplitude * math.sin(phase)
+                for sprite in sprites:
+                    sprite.base_y = sprite.center_y
+                    sprite.amplitude = amplitude
+                    sprite.phase = phase
+                    sprite.phase_speed = phase_speed
+                    sprite.center_y = sprite.base_y + initial_offset
 
             for tile in top_tiles + bottom_tiles:
                 self.scene.add_sprite("Pipes", tile)
@@ -516,10 +637,14 @@ class GameView(arcade.View):
 
 
 
-    def move_and_remove_existing_pipes(self):
+    def move_and_remove_existing_pipes(self, delta_time):
         for sprite_list_name in ("Pipes", "ScoreZones"):
             for pipe in self.scene.get_sprite_list(sprite_list_name):
                 pipe.center_x -= PIPE_SPEED
+                # Oscillating pipes carry phase/amplitude/base_y attrs set in spawn_pipes.
+                if hasattr(pipe, "phase_speed") and pipe.phase_speed:
+                    pipe.phase += pipe.phase_speed * delta_time
+                    pipe.center_y = pipe.base_y + pipe.amplitude * math.sin(pipe.phase)
                 if pipe.right < 0:
                     pipe.remove_from_sprite_lists()
 
@@ -543,6 +668,86 @@ class GameView(arcade.View):
             boulder.center_y = boulder.base_y + boulder.amplitude * math.sin(boulder.phase)
             if boulder.right < 0:
                 boulder.remove_from_sprite_lists()
+
+    def make_ring(self, x):
+        ring = arcade.Sprite(self.ring_textures[0], scale=RING_SCALE)
+        ring.center_x = x
+        ring.base_y = random.randint(RING_BASE_Y_MIN, RING_BASE_Y_MAX)
+        ring.amplitude = random.randint(RING_AMPLITUDE_MIN, RING_AMPLITUDE_MAX)
+        ring.phase = random.uniform(0, 2 * math.pi)
+        ring.phase_speed = random.uniform(RING_PHASE_SPEED_MIN, RING_PHASE_SPEED_MAX)
+        ring.center_y = ring.base_y + ring.amplitude * math.sin(ring.phase)
+        return ring
+
+    def spawn_ring_burst(self, x, y):
+        """ Spawn a starburst of small circles at the ring's collection point. """
+        for _ in range(PARTICLES_PER_BURST):
+            angle = random.uniform(0, 2 * math.pi)
+            speed = random.uniform(PARTICLE_SPEED_MIN, PARTICLE_SPEED_MAX)
+            particle = arcade.SpriteCircle(
+                radius=random.randint(PARTICLE_RADIUS_MIN, PARTICLE_RADIUS_MAX),
+                color=random.choice(PARTICLE_COLORS),
+            )
+            particle.center_x = x
+            particle.center_y = y
+            particle.change_x = math.cos(angle) * speed
+            particle.change_y = math.sin(angle) * speed
+            particle.lifetime = PARTICLE_LIFETIME
+            self.scene.add_sprite("Particles", particle)
+
+    def update_particles(self, delta_time):
+        for particle in self.scene.get_sprite_list("Particles"):
+            particle.change_y -= PARTICLE_GRAVITY
+            particle.center_x += particle.change_x
+            particle.center_y += particle.change_y
+            particle.lifetime -= delta_time
+            if particle.lifetime <= 0:
+                particle.remove_from_sprite_lists()
+            else:
+                particle.alpha = int(255 * (particle.lifetime / PARTICLE_LIFETIME))
+
+    def spawn_floating_text(self, x, y, message, color=arcade.color.GOLD):
+        text = arcade.Text(
+            message,
+            x=x,
+            y=y,
+            color=color,
+            font_size=22,
+            anchor_x="center",
+            anchor_y="center",
+            bold=True,
+        )
+        text.lifetime = FLOATING_TEXT_LIFETIME
+        text.base_rgb = tuple(color)[:3]
+        self.floating_texts.append(text)
+
+    def update_floating_texts(self, delta_time):
+        for text in self.floating_texts[:]:
+            text.y += FLOATING_TEXT_RISE_SPEED
+            text.lifetime -= delta_time
+            if text.lifetime <= 0:
+                self.floating_texts.remove(text)
+            else:
+                alpha = int(255 * (text.lifetime / FLOATING_TEXT_LIFETIME))
+                text.color = (*text.base_rgb, alpha)
+
+    def move_rings(self, delta_time):
+        # Advance the shared spin animation once per frame.
+        self.ring_animation_time += delta_time
+        if self.ring_animation_time >= RING_ANIMATION_FRAME_DURATION:
+            self.ring_animation_time -= RING_ANIMATION_FRAME_DURATION
+            self.ring_animation_frame = (self.ring_animation_frame + 1) % len(self.ring_textures)
+        current_texture = self.ring_textures[self.ring_animation_frame]
+
+        for ring in self.scene.get_sprite_list("Rings"):
+            ring.center_x -= PIPE_SPEED
+            ring.phase += ring.phase_speed * delta_time
+            ring.center_y = ring.base_y + ring.amplitude * math.sin(ring.phase)
+            ring.texture = current_texture
+            if ring.right < 0:
+                # Ring scrolled off without being collected — combo breaks.
+                self.ring_combo = 0
+                ring.remove_from_sprite_lists()
 
     def make_mountain(self, x):
         mountain = arcade.Sprite(self.mountain_texture, scale=MOUNTAIN_SCALE)
@@ -596,6 +801,8 @@ class GameView(arcade.View):
         self.gui_camera.use()
         arcade.draw_sprite(self.sky_sprite)
         self.scene.draw()
+        for text in self.floating_texts:
+            text.draw()
         self.score_text.draw()
         if self.is_paused:
             self.paused_text.draw()
