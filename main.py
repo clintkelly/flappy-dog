@@ -151,6 +151,14 @@ FLOATING_TEXT_COLORS = (
     arcade.color.LIGHT_SKY_BLUE,
 )
 
+# Milestone celebration — fires whenever the score crosses a multiple of THRESHOLD.
+MILESTONE_THRESHOLD = 10
+MILESTONE_TEXT_LIFETIME = 1.5
+MILESTONE_TEXT_START_SIZE = 80
+MILESTONE_TEXT_END_SIZE = 140
+MILESTONE_COLOR = arcade.color.GOLD
+MILESTONE_VOLUME = 0.7
+
 # Weather. RainSystem is a self-contained falling-rain effect; WeatherController
 # composes it with a thunderstorm state machine (clear → storm-onset → storm → clear)
 # and a flash overlay for lightning.
@@ -818,6 +826,7 @@ class GameView(arcade.View):
         self.gameover_sound = arcade.load_sound(":resources:sounds/gameover1.wav")
         self.coin_sound = arcade.load_sound(":resources:sounds/coin1.wav")
         self.ring_sound = arcade.load_sound(":resources:sounds/upgrade1.wav")
+        self.milestone_sound = arcade.load_sound(":resources:sounds/secret2.wav")
 
         # Weather: rain + thunderstorm cycle. Both sound files are optional;
         # drop assets/rain.{wav,ogg,mp3} and/or assets/thunder.{wav,ogg,mp3}
@@ -1031,8 +1040,7 @@ class GameView(arcade.View):
 
         for score_zone in score_zone_hits:
             score_zone.remove_from_sprite_lists()
-            self.score += 1
-            self.score_text.text = f"Score: {self.score}"
+            self._award_score(1)
             arcade.play_sound(self.coin_sound)
             # Spawn the floating text at the bird so it's visible regardless of
             # the score zone's height (boulder zones span the whole window).
@@ -1050,8 +1058,7 @@ class GameView(arcade.View):
             self.spawn_burst(ring.center_x, ring.center_y)
             self.ring_combo += 1
             bonus = RING_POINTS + (self.ring_combo - 1) * RING_COMBO_BONUS_STEP
-            self.score += bonus
-            self.score_text.text = f"Score: {self.score}"
+            self._award_score(bonus)
             self.spawn_floating_text(ring.center_x, ring.center_y, f"+{bonus}")
             pitch = min(1.0 + (self.ring_combo - 1) * RING_PITCH_STEP, RING_PITCH_MAX)
             arcade.play_sound(self.ring_sound, speed=pitch)
@@ -1063,8 +1070,7 @@ class GameView(arcade.View):
         )
         for coin in coin_hits:
             self.spawn_burst(coin.center_x, coin.center_y, count=COIN_PARTICLES_PER_BURST)
-            self.score += COIN_POINTS
-            self.score_text.text = f"Score: {self.score}"
+            self._award_score(COIN_POINTS)
             self.spawn_floating_text(coin.center_x, coin.center_y, f"+{COIN_POINTS}")
             arcade.play_sound(self.coin_sound)
             coin.remove_from_sprite_lists()
@@ -1397,19 +1403,59 @@ class GameView(arcade.View):
         )
         text.lifetime = FLOATING_TEXT_LIFETIME
         text.base_rgb = tuple(color)[:3]
+        text.is_milestone = False
         self.floating_texts.append(text)
+
+    def spawn_milestone_text(self, value):
+        """ Big centered celebration text shown when the score crosses a threshold. """
+        text = arcade.Text(
+            f"{value}!",
+            x=WINDOW_WIDTH // 2,
+            y=WINDOW_HEIGHT // 2,
+            color=MILESTONE_COLOR,
+            font_size=MILESTONE_TEXT_START_SIZE,
+            anchor_x="center",
+            anchor_y="center",
+            bold=True,
+        )
+        text.lifetime = MILESTONE_TEXT_LIFETIME
+        text.base_rgb = tuple(MILESTONE_COLOR)[:3]
+        text.is_milestone = True
+        self.floating_texts.append(text)
+
+    def _award_score(self, points):
+        """ Add points, refresh the HUD, and fire a milestone celebration when
+        the new total crosses a multiple of MILESTONE_THRESHOLD. """
+        old = self.score
+        self.score += points
+        self.score_text.text = f"Score: {self.score}"
+        if self.score // MILESTONE_THRESHOLD > old // MILESTONE_THRESHOLD:
+            milestone = (self.score // MILESTONE_THRESHOLD) * MILESTONE_THRESHOLD
+            self.spawn_milestone_text(milestone)
+            arcade.play_sound(self.milestone_sound, volume=MILESTONE_VOLUME)
 
     def update_floating_texts(self, delta_time):
         for text in self.floating_texts[:]:
-            text.y += FLOATING_TEXT_RISE_SPEED
             text.lifetime -= delta_time
             if text.lifetime <= 0:
                 self.floating_texts.remove(text)
+                continue
+            if text.is_milestone:
+                # Stays centered, grows from start to end size, fades over the
+                # whole lifetime. No vertical drift — it's a flashy stamp.
+                progress = 1.0 - (text.lifetime / MILESTONE_TEXT_LIFETIME)
+                text.font_size = lerp(
+                    MILESTONE_TEXT_START_SIZE, MILESTONE_TEXT_END_SIZE, progress,
+                )
+                alpha = int(255 * (text.lifetime / MILESTONE_TEXT_LIFETIME))
             else:
+                text.y += FLOATING_TEXT_RISE_SPEED
                 progress = 1.0 - (text.lifetime / FLOATING_TEXT_LIFETIME)
-                text.font_size = lerp(FLOATING_TEXT_START_SIZE, FLOATING_TEXT_END_SIZE, progress)
+                text.font_size = lerp(
+                    FLOATING_TEXT_START_SIZE, FLOATING_TEXT_END_SIZE, progress,
+                )
                 alpha = int(255 * (text.lifetime / FLOATING_TEXT_LIFETIME))
-                text.color = (*text.base_rgb, alpha)
+            text.color = (*text.base_rgb, alpha)
 
     def move_rings(self, delta_time):
         # Advance the shared spin animation once per frame.
