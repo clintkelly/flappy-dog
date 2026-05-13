@@ -1850,8 +1850,22 @@ class GameView(arcade.View):
             arcade.draw_sprite(wolf)
 
     def check_wolf_collisions(self):
+        # Collide against the bubble (the visible glow halo), not the wolf
+        # sprite inside it. Trigger radius = max bubble extent + bird radius
+        # so any visible overlap counts.
+        bird_x = self.player_sprite.center_x
+        bird_y = self.player_sprite.center_y
+        # Approximate the bird as a circle using half its sprite width.
+        bird_radius = self.player_sprite.width / 2
+        bubble_max_radius = WOLF_BUBBLE_RADIUS + WOLF_BUBBLE_PULSE_AMPLITUDE
+        trigger = bubble_max_radius + bird_radius
+        trigger_sq = trigger * trigger
         for wolf in self.wolves:
-            if wolf.state == "caged" and arcade.check_for_collision(self.player_sprite, wolf):
+            if wolf.state != "caged":
+                continue
+            dx = bird_x - wolf.center_x
+            dy = bird_y - wolf.center_y
+            if dx * dx + dy * dy < trigger_sq:
                 self._rescue_wolf(wolf)
 
     def _rescue_wolf(self, wolf):
