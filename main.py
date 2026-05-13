@@ -270,6 +270,23 @@ WOLF_TRAIL_COLORS = (
     arcade.color.YELLOW,
     arcade.color.WHITE,
 )
+# Subtle "puff of air" particles emitted from the bird's tail on each flap —
+# small downward-and-back burst that fades quickly so the screen doesn't
+# clutter with feathers while the player is just continuously flapping.
+BIRD_FLAP_PARTICLE_COUNT = 8
+BIRD_FLAP_PARTICLE_LIFETIME = 0.3
+BIRD_FLAP_PARTICLE_RADIUS_MIN = 3
+BIRD_FLAP_PARTICLE_RADIUS_MAX = 6
+BIRD_FLAP_PARTICLE_SPEED_MIN = 1.0
+BIRD_FLAP_PARTICLE_SPEED_MAX = 2.5
+BIRD_FLAP_PARTICLE_SPREAD = math.pi / 3   # ±30° around straight-down
+BIRD_FLAP_PARTICLE_OFFSET_X = -20         # spawn behind the bird (it faces right)
+BIRD_FLAP_PARTICLE_OFFSET_Y = -22         # spawn just below tail
+BIRD_FLAP_PARTICLE_COLORS = (
+    arcade.color.WHITE,
+    arcade.color.LIGHT_GRAY,
+    (240, 230, 210),    # warm cream
+)
 
 # Spiky-ball obstacle. Uses the new Motion strategy (CircularMotion) — the
 # ball orbits a base point at a fixed radius while the base scrolls leftward.
@@ -1212,6 +1229,7 @@ class GameView(arcade.View):
         if key == arcade.key.SPACE:
             self.player_sprite.change_y = FLAP_VELOCITY
             arcade.play_sound(self.jump_sound)
+            self.spawn_flap_puff()
         elif key == arcade.key.LEFT or key == arcade.key.A:
             self.player_sprite.change_x = -PLAYER_X_SPEED
             self.moving_horizontally = True
@@ -1910,6 +1928,33 @@ class GameView(arcade.View):
             particle.lifetime = PARTICLE_LIFETIME
             particle.max_lifetime = PARTICLE_LIFETIME
             particle.gravity = PARTICLE_GRAVITY
+            self.scene.add_sprite("Particles", particle)
+
+    def spawn_flap_puff(self):
+        """ Small downward-and-back burst of pale particles from the bird's
+        tail. Called once per flap as a subtle "wing pushed air" cue. """
+        x = self.player_sprite.center_x + BIRD_FLAP_PARTICLE_OFFSET_X
+        y = self.player_sprite.center_y + BIRD_FLAP_PARTICLE_OFFSET_Y
+        half_spread = BIRD_FLAP_PARTICLE_SPREAD / 2
+        for _ in range(BIRD_FLAP_PARTICLE_COUNT):
+            # Angle centered on straight-down (3π/2), narrow cone.
+            angle = (3 * math.pi / 2) + random.uniform(-half_spread, half_spread)
+            speed = random.uniform(
+                BIRD_FLAP_PARTICLE_SPEED_MIN, BIRD_FLAP_PARTICLE_SPEED_MAX,
+            )
+            particle = arcade.SpriteCircle(
+                radius=random.randint(
+                    BIRD_FLAP_PARTICLE_RADIUS_MIN, BIRD_FLAP_PARTICLE_RADIUS_MAX,
+                ),
+                color=random.choice(BIRD_FLAP_PARTICLE_COLORS),
+            )
+            particle.center_x = x
+            particle.center_y = y
+            particle.change_x = math.cos(angle) * speed
+            particle.change_y = math.sin(angle) * speed
+            particle.lifetime = BIRD_FLAP_PARTICLE_LIFETIME
+            particle.max_lifetime = BIRD_FLAP_PARTICLE_LIFETIME
+            particle.gravity = 0.0
             self.scene.add_sprite("Particles", particle)
 
     def spawn_trail_particle(self, x, y, colors, radius_min, radius_max, lifetime):
