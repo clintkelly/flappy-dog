@@ -26,6 +26,7 @@ from events import (
     ScoreZoneCleared,
     WolfRescued,
 )
+from flame_thrower import FlameThrowerCycle
 from motion import CircularMotion, LinearMotion, SineMotion
 from player_state import NormalState, PlayerState
 from score_store import DEFAULT_PROFILE, ScoreStore
@@ -87,7 +88,7 @@ MAX_PIPE_SPACING = 360
 # past base to a tougher peak as the score climbs to DIFFICULTY_RAMP_SCORE.
 # Higher *_AT_START = easier opening (e.g. 1.55 means gaps are 55% bigger than base).
 # Lower *_AT_MAX_DIFFICULTY = harder peak (e.g. 0.65 = tightens to 65% of base).
-DIFFICULTY_RAMP_SCORE = 60
+DIFFICULTY_RAMP_SCORE = 200
 GAP_RATIO_AT_START = 1.55
 GAP_RATIO_AT_MAX_DIFFICULTY = 0.65
 SPACING_RATIO_AT_START = 1.40
@@ -259,6 +260,24 @@ SPIKY_BALL_BASE_Y_MIN = 250           # orbit-center y range (middle band)
 SPIKY_BALL_BASE_Y_MAX = WINDOW_HEIGHT - 250
 SPIKY_BALL_SPIN_DEGREES_PER_FRAME = 5  # purely visual sprite rotation
 
+# Flame thrower. Floor-mounted obstacle that cycles dormant -> wisp warning ->
+# extending flame column -> hold -> recede -> dormant. Owns its own lane via
+# the spawn table so a column doesn't share its x.
+FLAME_THROWER_SPAWN_CHANCE = 0.04   # slightly rarer than wolves at 0.05
+FLAME_THROWER_BASE_SCALE = 1.5
+FLAME_SEGMENT_SCALE = 2.0
+FLAME_SEGMENT_HEIGHT = 64           # native; rendered height = FLAME_SEGMENT_HEIGHT * scale
+FLAME_THROWER_MAX_SEGMENTS = 6
+FLAME_SEGMENT_OVERLAP = 0.4         # fraction of segment height that overlaps with the
+                                    # next one — stride = (1 - overlap) * height
+FLAME_ANIMATION_FRAME_DURATION = 0.06
+FLAME_DORMANT_DURATION = 2.5
+FLAME_WARMING_DURATION = 0.3
+FLAME_EXTENDING_DURATION = 0.5
+FLAME_HOLDING_DURATION = 1.0
+FLAME_RECEDING_DURATION = 0.4
+FLAME_IGNITION_VOLUME = 0.6
+
 # Spawn distribution. Column-pair takes whatever weight is left after the
 # others — keeps the table summing to 1.0 even when individual chances change.
 _COLUMN_PAIR_SPAWN_WEIGHT = (
@@ -267,12 +286,14 @@ _COLUMN_PAIR_SPAWN_WEIGHT = (
     - SPIKY_BALL_SPAWN_CHANCE
     - RING_OBSTACLE_CHANCE
     - BOULDER_OBSTACLE_CHANCE
+    - FLAME_THROWER_SPAWN_CHANCE
 )
 OBSTACLE_SPAWN_TABLE = SpawnTable([
     ("wolf", WOLF_SPAWN_CHANCE),
     ("spiky", SPIKY_BALL_SPAWN_CHANCE),
     ("ring", RING_OBSTACLE_CHANCE),
     ("boulder", BOULDER_OBSTACLE_CHANCE),
+    ("flame_thrower", FLAME_THROWER_SPAWN_CHANCE),
     ("column", _COLUMN_PAIR_SPAWN_WEIGHT),
 ])
 
@@ -984,6 +1005,8 @@ class GameView(arcade.View):
         self.wolf_standing_texture = assets.wolf_standing_texture
         self.wolf_howling_texture = assets.wolf_howling_texture
         self.spiky_ball_texture = assets.spiky_ball_texture
+        self.flame_thrower_base_texture = assets.flame_thrower_base_texture
+        self.flame_textures = assets.flame_textures
 
         # Sounds
         self.jump_sound = assets.jump_sound
@@ -992,6 +1015,7 @@ class GameView(arcade.View):
         self.ring_sound = assets.ring_sound
         self.milestone_sound = assets.milestone_sound
         self.howl_sound = assets.howl_sound
+        self.flame_ignition_sound = assets.flame_ignition_sound
 
         # Static sky background sprite (rebuilt per GameView — cheap).
         self.sky_sprite = arcade.Sprite(assets.sky_texture, scale=4)
@@ -1007,6 +1031,7 @@ class GameView(arcade.View):
         # Animation cyclers replace the duplicated frame/time/wrap state
         # that used to live on the view for bird/ring/coin separately.
         self.bird_cycler = AnimationCycler(self.player_textures, PLAYER_ANIMATION_FRAME_DURATION)
+        self.flame_cycler = AnimationCycler(self.flame_textures, FLAME_ANIMATION_FRAME_DURATION)
         self.ring_cycler = AnimationCycler(self.ring_textures, RING_ANIMATION_FRAME_DURATION)
         self.coin_cycler = AnimationCycler(self.coin_textures, COIN_ANIMATION_FRAME_DURATION)
 
@@ -1106,6 +1131,11 @@ class GameView(arcade.View):
         self.scene.add_sprite_list("Pipes")
         self.scene.add_sprite_list("Boulders")
         self.scene.add_sprite_list("OrbitObstacles")
+        # Flame-thrower bases scroll like pipes; their flames live in a
+        # separate list so collision against "Flames" is a single check and
+        # segments can be added/removed each frame as the cycle progresses.
+        self.scene.add_sprite_list("FlameThrowerBases")
+        self.scene.add_sprite_list("Flames")
         self.scene.add_sprite_list("Rings")
         self.scene.add_sprite_list("Coins")
         self.scene.add_sprite_list("ScoreZones")
@@ -1274,6 +1304,7 @@ class GameView(arcade.View):
         self.move_and_remove_existing_pipes(delta_time)
         self.move_boulders(delta_time)
         self.move_orbit_obstacles(delta_time)
+        self.move_flame_throwers(delta_time)
         self.move_rings(delta_time)
         self.move_coins(delta_time)
         self.update_wolves(delta_time)
@@ -1292,7 +1323,8 @@ class GameView(arcade.View):
         # absorb, or invincible plow-through).
         if (arcade.check_for_collision_with_list(self.player_sprite, self.scene["Pipes"])
                 or arcade.check_for_collision_with_list(self.player_sprite, self.scene["Boulders"])
-                or arcade.check_for_collision_with_list(self.player_sprite, self.scene["OrbitObstacles"])):
+                or arcade.check_for_collision_with_list(self.player_sprite, self.scene["OrbitObstacles"])
+                or arcade.check_for_collision_with_list(self.player_sprite, self.scene["Flames"])):
             result = self.player_state.on_collision(self.player_sprite)
             if result.game_over:
                 self.game_over()
@@ -1394,7 +1426,7 @@ class GameView(arcade.View):
         # currently-oscillating center_x — motions that don't track a
         # horizontal anchor fall back to center_x.
         last_x = -float("inf")
-        for list_name in ("Pipes", "Boulders", "Rings", "OrbitObstacles"):
+        for list_name in ("Pipes", "Boulders", "Rings", "OrbitObstacles", "FlameThrowerBases"):
             sprites = self.scene.get_sprite_list(list_name)
             if sprites:
                 anchor = sprites[-1]
@@ -1509,6 +1541,10 @@ class GameView(arcade.View):
         elif kind == "ring":
             # Bonus ring spawn (non-fatal pickup).
             self.scene.add_sprite("Rings", self.make_ring(column_x))
+        elif kind == "flame_thrower":
+            # Floor-mounted flame thrower with a predictable extend/hold/recede
+            # cycle. Owns its lane — no column pair at the same x.
+            self.spawn_flame_thrower(column_x)
         elif kind == "boulder":
             # Spawn a single oscillating boulder instead of a column pair. Constrain
             # its lowest swing so the bonus ring at the floor stays reachable.
@@ -1688,6 +1724,93 @@ class GameView(arcade.View):
             obstacle.angle += SPIKY_BALL_SPIN_DEGREES_PER_FRAME
             if obstacle.motion.base_x + obstacle.motion.radius < 0:
                 obstacle.remove_from_sprite_lists()
+
+    def spawn_flame_thrower(self, x):
+        """ Place a flame-thrower base at the floor and register a score-zone
+        trip-wire past it. The base owns its own ``FlameThrowerCycle`` and
+        a (initially empty) list of segment sprites that ``move_flame_throwers``
+        reconciles each frame. """
+        base = arcade.Sprite(
+            self.flame_thrower_base_texture, scale=FLAME_THROWER_BASE_SCALE,
+        )
+        base.center_x = x
+        base.center_y = base.height / 2     # sit on the floor (y=0)
+        base.cycle = FlameThrowerCycle(
+            max_segments=FLAME_THROWER_MAX_SEGMENTS,
+            dormant_duration=FLAME_DORMANT_DURATION,
+            warming_duration=FLAME_WARMING_DURATION,
+            extending_duration=FLAME_EXTENDING_DURATION,
+            holding_duration=FLAME_HOLDING_DURATION,
+            receding_duration=FLAME_RECEDING_DURATION,
+            initial_phase=random.uniform(0, FLAME_DORMANT_DURATION),
+        )
+        base.segments = []  # list of arcade.Sprite, reconciled each frame
+        self.scene.add_sprite("FlameThrowerBases", base)
+
+        score_zone = arcade.SpriteSolidColor(
+            width=SCORE_ZONE_WIDTH,
+            height=WINDOW_HEIGHT,
+            color=arcade.color.RED,
+        )
+        score_zone.center_x = x + SCORE_ZONE_X_OFFSET
+        score_zone.center_y = WINDOW_HEIGHT // 2
+        score_zone.visible = False
+        score_zone.motion = LinearMotion(vx=-PIPE_SPEED)
+        self.scene.add_sprite("ScoreZones", score_zone)
+
+    def move_flame_throwers(self, delta_time):
+        """ For each flame-thrower base: scroll left, tick its cycle, play the
+        ignition sound on warming->extending, and reconcile its segment sprites
+        in the shared "Flames" list with the cycle's current segment_count. """
+        # Shared flame animation — one cycler ticks all segments in sync.
+        self.flame_cycler.tick(delta_time)
+        current_flame_texture = self.flame_cycler.current
+
+        # Segment vertical layout: first segment center sits one half-height
+        # above the base, each next segment is one ``stride`` higher.
+        segment_height = FLAME_SEGMENT_HEIGHT * FLAME_SEGMENT_SCALE
+        segment_stride = segment_height * (1 - FLAME_SEGMENT_OVERLAP)
+
+        flames_list = self.scene.get_sprite_list("Flames")
+        for base in list(self.scene.get_sprite_list("FlameThrowerBases")):
+            base.center_x -= PIPE_SPEED
+            previous_state = base.cycle.state
+            base.cycle.update(delta_time)
+            if base.cycle.just_ignited(previous_state) and self.flame_ignition_sound:
+                arcade.play_sound(
+                    self.flame_ignition_sound, volume=FLAME_IGNITION_VOLUME,
+                )
+
+            # Reconcile segments against the cycle's current count.
+            desired = base.cycle.segment_count
+            existing = base.segments
+            # Add new segments stacked above the previously-topmost one.
+            while len(existing) < desired:
+                segment = arcade.Sprite(
+                    current_flame_texture, scale=FLAME_SEGMENT_SCALE,
+                )
+                segment.center_x = base.center_x
+                index = len(existing)
+                segment.center_y = base.top + segment_height / 2 + index * segment_stride
+                flames_list.append(segment)
+                existing.append(segment)
+            # Remove from the top down when receding.
+            while len(existing) > desired:
+                segment = existing.pop()
+                segment.remove_from_sprite_lists()
+
+            # Slide existing segments to track the base, refresh texture.
+            for index, segment in enumerate(existing):
+                segment.center_x = base.center_x
+                segment.center_y = base.top + segment_height / 2 + index * segment_stride
+                segment.texture = current_flame_texture
+
+            # Recycle when the base has fully scrolled off-screen.
+            if base.right < 0:
+                for segment in existing:
+                    segment.remove_from_sprite_lists()
+                existing.clear()
+                base.remove_from_sprite_lists()
 
     def make_ring(self, x):
         ring = arcade.Sprite(self.ring_textures[0], scale=RING_SCALE)

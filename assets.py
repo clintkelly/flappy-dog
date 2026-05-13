@@ -71,6 +71,14 @@ class AssetLibrary:
         self.wolf_standing_texture = arcade.load_texture(self.dir / "wolf_standing.png")
         self.wolf_howling_texture = arcade.load_texture(self.dir / "wolf_howling.png")
 
+        # Flame thrower base + flame-segment animation frames (alt2..alt17).
+        self.flame_thrower_base_texture = arcade.load_texture(
+            self.dir / "flame_thrower_base.png", hit_box_algorithm=detailed,
+        )
+        # Default (rectangular) hitbox on flames so collision doesn't jitter
+        # frame-to-frame as the flame flickers — predictability over fidelity.
+        self.flame_textures = self._load_glob("flame_alt*.png", numeric_sort=True)
+
         # Sounds (always present — bundled with arcade or with the game)
         self.jump_sound = arcade.load_sound(":resources:sounds/jump1.wav")
         self.gameover_sound = arcade.load_sound(":resources:sounds/gameover1.wav")
@@ -83,6 +91,7 @@ class AssetLibrary:
         # falls back to silence rather than crashing).
         self.rain_sound = self._load_optional_sound("rain")
         self.thunder_sound = self._load_optional_sound("thunder")
+        self.flame_ignition_sound = self._load_optional_sound("flame_ignition")
 
     # ----- helpers -----
 
