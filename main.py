@@ -11,6 +11,7 @@ import arcade
 import pyglet
 import random
 
+from motion import CircularMotion
 from score_store import DEFAULT_PROFILE, ScoreStore
 
 # Constants
@@ -218,6 +219,18 @@ WOLF_CELEBRATION_COLOR = arcade.color.CYAN
 # After a wolf, the very next column's gap_center is clamped to within this
 # delta of the wolf's altitude so the player can actually reach it.
 WOLF_REACHABLE_DELTA_Y = 200
+
+# Spiky-ball obstacle. Uses the new Motion strategy (CircularMotion) — the
+# ball orbits a base point at a fixed radius while the base scrolls leftward.
+SPIKY_BALL_SPAWN_CHANCE = 0.06
+SPIKY_BALL_SCALE = 3                  # 64 native -> 192 rendered
+SPIKY_BALL_RADIUS_MIN = 90
+SPIKY_BALL_RADIUS_MAX = 150
+SPIKY_BALL_ANGULAR_SPEED_MIN = 1.8    # radians/sec
+SPIKY_BALL_ANGULAR_SPEED_MAX = 2.8
+SPIKY_BALL_BASE_Y_MIN = 250           # orbit-center y range (middle band)
+SPIKY_BALL_BASE_Y_MAX = WINDOW_HEIGHT - 250
+SPIKY_BALL_SPIN_DEGREES_PER_FRAME = 5  # purely visual sprite rotation
 
 # Weather. RainSystem is a self-contained falling-rain effect; WeatherController
 # composes it with a thunderstorm state machine (clear → storm-onset → storm → clear)
@@ -1027,6 +1040,10 @@ class GameView(arcade.View):
 
         self.wolf_standing_texture = arcade.load_texture(ASSET_DIR / "wolf_standing.png")
         self.wolf_howling_texture = arcade.load_texture(ASSET_DIR / "wolf_howling.png")
+        self.spiky_ball_texture = arcade.load_texture(
+            ASSET_DIR / "spiky_ball.png",
+            hit_box_algorithm=arcade.hitbox.algo_detailed,
+        )
 
         # Weather: rain + thunderstorm cycle. Both sound files are optional;
         # drop assets/rain.{wav,ogg,mp3} and/or assets/thunder.{wav,ogg,mp3}
@@ -1148,6 +1165,7 @@ class GameView(arcade.View):
         self.scene.add_sprite("Player", self.player_sprite)
         self.scene.add_sprite_list("Pipes")
         self.scene.add_sprite_list("Boulders")
+        self.scene.add_sprite_list("OrbitObstacles")
         self.scene.add_sprite_list("Rings")
         self.scene.add_sprite_list("Coins")
         self.scene.add_sprite_list("ScoreZones")
@@ -1312,6 +1330,7 @@ class GameView(arcade.View):
         # Move and remove existing pipes
         self.move_and_remove_existing_pipes(delta_time)
         self.move_boulders(delta_time)
+        self.move_orbit_obstacles(delta_time)
         self.move_rings(delta_time)
         self.move_coins(delta_time)
         self.update_wolves(delta_time)
@@ -1325,11 +1344,13 @@ class GameView(arcade.View):
         self.move_mountains()
         self.move_clouds()
 
-        # Collision detection — pipes or boulders both kill the bird
+        # Collision detection — pipes, boulders, or spiky balls all kill the bird
         if arcade.check_for_collision_with_list(
             self.player_sprite, self.scene["Pipes"]
         ) or arcade.check_for_collision_with_list(
             self.player_sprite, self.scene["Boulders"]
+        ) or arcade.check_for_collision_with_list(
+            self.player_sprite, self.scene["OrbitObstacles"]
         ):
             self.game_over()
 
@@ -1407,12 +1428,16 @@ class GameView(arcade.View):
 
     def should_generate_new_pipe(self):
         # Look at the rightmost sprite across all spawnable slots so spacing is
-        # consistent regardless of which kind was spawned last.
+        # consistent regardless of which kind was spawned last. For orbiting
+        # obstacles, use the orbit center (motion.base_x) rather than the
+        # current oscillating center_x.
         last_x = -float("inf")
-        for list_name in ("Pipes", "Boulders", "Rings"):
+        for list_name in ("Pipes", "Boulders", "Rings", "OrbitObstacles"):
             sprites = self.scene.get_sprite_list(list_name)
             if sprites:
-                last_x = max(last_x, sprites[-1].center_x)
+                anchor = sprites[-1]
+                x = anchor.motion.base_x if hasattr(anchor, "motion") else anchor.center_x
+                last_x = max(last_x, x)
         if last_x == -float("inf"):
             return True
         return last_x < WINDOW_WIDTH - self.next_pipe_spacing
@@ -1505,15 +1530,29 @@ class GameView(arcade.View):
         # Spawn just off the right edge of the screen
         column_x = WINDOW_WIDTH + COLUMN_TILE_RENDERED // 2
 
-        # Single roll picks wolf / ring / boulder / column-pair so probabilities don't compound.
+        # Single roll picks wolf / spiky / ring / boulder / column-pair so probabilities don't compound.
         roll = random.random()
         if roll < WOLF_SPAWN_CHANCE:
             # Rare rescue opportunity — wolf in a bubble at an off-center altitude.
             self.spawn_wolf(column_x)
-        elif roll < WOLF_SPAWN_CHANCE + RING_OBSTACLE_CHANCE:
+        elif roll < WOLF_SPAWN_CHANCE + SPIKY_BALL_SPAWN_CHANCE:
+            # Rotating spiky ball: deadly on contact, scores by clearing.
+            ball = self.make_spiky_ball(column_x)
+            self.scene.add_sprite("OrbitObstacles", ball)
+            # Full-window-height score-zone trip-wire (like boulders).
+            score_zone = arcade.SpriteSolidColor(
+                width=SCORE_ZONE_WIDTH, height=WINDOW_HEIGHT, color=arcade.color.RED,
+            )
+            score_zone.center_x = column_x + SCORE_ZONE_X_OFFSET
+            score_zone.center_y = WINDOW_HEIGHT // 2
+            score_zone.visible = False
+            self.scene.add_sprite("ScoreZones", score_zone)
+            # Make the next column reachable from the ball's orbit center.
+            self.next_gap_center_bias = ball.motion.base_y
+        elif roll < WOLF_SPAWN_CHANCE + SPIKY_BALL_SPAWN_CHANCE + RING_OBSTACLE_CHANCE:
             # Bonus ring spawn (non-fatal pickup).
             self.scene.add_sprite("Rings", self.make_ring(column_x))
-        elif roll < WOLF_SPAWN_CHANCE + RING_OBSTACLE_CHANCE + BOULDER_OBSTACLE_CHANCE:
+        elif roll < WOLF_SPAWN_CHANCE + SPIKY_BALL_SPAWN_CHANCE + RING_OBSTACLE_CHANCE + BOULDER_OBSTACLE_CHANCE:
             # Spawn a single oscillating boulder instead of a column pair. Constrain
             # its lowest swing so the bonus ring at the floor stays reachable.
             self.scene.add_sprite(
@@ -1653,6 +1692,35 @@ class GameView(arcade.View):
             boulder.center_y = boulder.base_y + boulder.amplitude * math.sin(boulder.phase)
             if boulder.right < 0:
                 boulder.remove_from_sprite_lists()
+
+    def make_spiky_ball(self, x):
+        """ A spiky ball orbiting a center that scrolls left at PIPE_SPEED.
+        Uses the Strategy-pattern CircularMotion from motion.py. """
+        ball = arcade.Sprite(self.spiky_ball_texture, scale=SPIKY_BALL_SCALE)
+        base_y = random.randint(SPIKY_BALL_BASE_Y_MIN, SPIKY_BALL_BASE_Y_MAX)
+        radius = random.randint(SPIKY_BALL_RADIUS_MIN, SPIKY_BALL_RADIUS_MAX)
+        angular_speed = random.uniform(SPIKY_BALL_ANGULAR_SPEED_MIN, SPIKY_BALL_ANGULAR_SPEED_MAX)
+        if random.random() < 0.5:
+            angular_speed = -angular_speed  # randomize CW vs CCW
+        motion = CircularMotion(
+            base_x=x, base_y=base_y,
+            radius=radius, angular_speed=angular_speed,
+            phase=random.uniform(0, 2 * math.pi),
+            vx=-PIPE_SPEED,
+        )
+        motion.place(ball)
+        ball.motion = motion
+        return ball
+
+    def move_orbit_obstacles(self, delta_time):
+        """ Advance each orbit obstacle via its Motion strategy, spin the
+        sprite visually, and cull when the orbit center is fully past the
+        left edge. """
+        for obstacle in self.scene.get_sprite_list("OrbitObstacles"):
+            obstacle.motion.update(obstacle, delta_time)
+            obstacle.angle += SPIKY_BALL_SPIN_DEGREES_PER_FRAME
+            if obstacle.motion.base_x + obstacle.motion.radius < 0:
+                obstacle.remove_from_sprite_lists()
 
     def make_ring(self, x):
         ring = arcade.Sprite(self.ring_textures[0], scale=RING_SCALE)
