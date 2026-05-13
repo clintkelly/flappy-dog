@@ -12,6 +12,7 @@ import pyglet
 import random
 
 from motion import CircularMotion
+from player_state import NormalState, PlayerState
 from score_store import DEFAULT_PROFILE, ScoreStore
 
 # Constants
@@ -1087,6 +1088,9 @@ class GameView(arcade.View):
 
         self.score = 0
         self.is_paused = False
+        # Player state machine (Normal / Shielded / Invincible / Dashing).
+        # NormalState is a no-op default; power-ups will swap this in later.
+        self.player_state: PlayerState = NormalState()
         # Tracks whether the analog stick is currently "pushed" past the
         # deadzone — emulates LEFT/RIGHT keyboard press/release transitions.
         self._stick_left_pressed = False
@@ -1296,6 +1300,12 @@ class GameView(arcade.View):
             self.game_over_time += delta_time
             return
 
+        # Tick the player state machine. A state may self-transition when a
+        # timer expires (e.g., invincibility wearing off back to normal).
+        next_state = self.player_state.update(self.player_sprite, delta_time)
+        if next_state is not None:
+            self._transition_player_state(next_state)
+
         self.player_sprite.change_y -= GRAVITY
         # Wind gusts push the bird (downdraft) while it's inside their corridor.
         fx, fy = self.weather.force_at(self.player_sprite.center_x, self.player_sprite.center_y)
@@ -1344,15 +1354,17 @@ class GameView(arcade.View):
         self.move_mountains()
         self.move_clouds()
 
-        # Collision detection — pipes, boulders, or spiky balls all kill the bird
-        if arcade.check_for_collision_with_list(
-            self.player_sprite, self.scene["Pipes"]
-        ) or arcade.check_for_collision_with_list(
-            self.player_sprite, self.scene["Boulders"]
-        ) or arcade.check_for_collision_with_list(
-            self.player_sprite, self.scene["OrbitObstacles"]
-        ):
-            self.game_over()
+        # Collision detection — pipes, boulders, or spiky balls. The current
+        # player state decides what happens on contact (game over, shielded
+        # absorb, or invincible plow-through).
+        if (arcade.check_for_collision_with_list(self.player_sprite, self.scene["Pipes"])
+                or arcade.check_for_collision_with_list(self.player_sprite, self.scene["Boulders"])
+                or arcade.check_for_collision_with_list(self.player_sprite, self.scene["OrbitObstacles"])):
+            result = self.player_state.on_collision(self.player_sprite)
+            if result.game_over:
+                self.game_over()
+            if result.next_state is not None:
+                self._transition_player_state(result.next_state)
 
         score_zone_hits = arcade.check_for_collision_with_list(
             self.player_sprite,
@@ -1403,6 +1415,13 @@ class GameView(arcade.View):
         # bottom edge and still flap back up.
         if self.player_sprite.center_y < -BOTTOM_GRACE_PIXELS:
             self.game_over()
+
+    def _transition_player_state(self, new_state: PlayerState) -> None:
+        """ Swap to a new player state, firing exit/enter hooks for visual
+        or audio side effects (shield bubble on, star-trail off, etc.). """
+        self.player_state.exit(self.player_sprite)
+        self.player_state = new_state
+        self.player_state.enter(self.player_sprite)
 
     def game_over(self):
         # Idempotent — collision and out-of-bounds checks can both fire on the
