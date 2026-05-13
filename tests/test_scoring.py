@@ -4,7 +4,7 @@ Tests for scoring math in scoring.py.
 
 import pytest
 
-from scoring import combo_bonus, combo_pitch, crossed_milestone
+from scoring import coin_streak_bonus, combo_bonus, combo_pitch, crossed_milestone
 
 
 # --- combo_bonus ---------------------------------------------------------
@@ -85,3 +85,51 @@ def test_crossed_milestone_handles_negative_threshold():
 
 def test_crossed_milestone_no_score_change():
     assert crossed_milestone(old_score=10, new_score=10, threshold=10) is None
+
+
+# --- coin_streak_bonus ---------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "combo,expected",
+    [
+        (10, 10),   # tier 1: base
+        (20, 20),   # tier 2: 2x
+        (30, 40),   # tier 3: 4x
+        (40, 80),   # tier 4: 8x (also matches cap)
+        (50, 80),   # tier 5: capped
+        (100, 80),  # tier 10: still capped
+    ],
+)
+def test_coin_streak_bonus_doubles_then_caps(combo, expected):
+    assert coin_streak_bonus(combo, threshold=10, base_bonus=10, cap=80) == expected
+
+
+@pytest.mark.parametrize("combo", [1, 5, 9, 11, 19, 21, 99])
+def test_coin_streak_bonus_returns_none_off_threshold(combo):
+    assert coin_streak_bonus(combo, threshold=10, base_bonus=10, cap=80) is None
+
+
+def test_coin_streak_bonus_zero_combo_is_none():
+    assert coin_streak_bonus(0, threshold=10, base_bonus=10, cap=80) is None
+
+
+def test_coin_streak_bonus_negative_combo_is_none():
+    assert coin_streak_bonus(-10, threshold=10, base_bonus=10, cap=80) is None
+
+
+def test_coin_streak_bonus_invalid_threshold_is_none():
+    assert coin_streak_bonus(10, threshold=0, base_bonus=10, cap=80) is None
+    assert coin_streak_bonus(10, threshold=-1, base_bonus=10, cap=80) is None
+
+
+def test_coin_streak_bonus_invalid_base_is_none():
+    assert coin_streak_bonus(10, threshold=10, base_bonus=0, cap=80) is None
+
+
+def test_coin_streak_bonus_respects_custom_threshold():
+    # Threshold = 5, base = 4, cap = 100: tier 1 fires at 5, tier 2 at 10.
+    assert coin_streak_bonus(5, threshold=5, base_bonus=4, cap=100) == 4
+    assert coin_streak_bonus(10, threshold=5, base_bonus=4, cap=100) == 8
+    assert coin_streak_bonus(15, threshold=5, base_bonus=4, cap=100) == 16
+    assert coin_streak_bonus(6, threshold=5, base_bonus=4, cap=100) is None

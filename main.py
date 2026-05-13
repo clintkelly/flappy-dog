@@ -18,6 +18,7 @@ from animation import AnimationCycler
 from assets import AssetLibrary
 from events import (
     CoinCollected,
+    CoinStreakBonus,
     EventBus,
     GameOver,
     MilestoneCrossed,
@@ -324,6 +325,21 @@ COIN_Y_MIN = 200
 COIN_Y_MAX = WINDOW_HEIGHT - 200
 COIN_POINTS = 1
 COIN_PARTICLES_PER_BURST = 8
+# Streak bonus: every COIN_STREAK_THRESHOLD coins in a row fires an escalating
+# bonus. Tier N pays base * 2**(N-1), clamped to COIN_STREAK_BONUS_CAP.
+# A single missed coin (one that scrolls off-screen) resets the streak to 0.
+COIN_STREAK_THRESHOLD = 10
+COIN_STREAK_BASE_BONUS = 10
+COIN_STREAK_BONUS_CAP = 80
+COIN_STREAK_COLOR = arcade.color.GOLD
+COIN_STREAK_SOUND_SPEED = 1.35      # pitch the milestone fanfare up so it sounds distinct
+COIN_STREAK_SOUND_VOLUME = 0.7
+# Streak text — smaller ramp than the milestone stamp and positioned in the
+# upper third of the screen so the two celebrations don't pile on top of each
+# other when a 50-point milestone coincides with a streak crossing.
+COIN_STREAK_TEXT_START_SIZE = 24
+COIN_STREAK_TEXT_END_SIZE = 36
+COIN_STREAK_TEXT_Y = WINDOW_HEIGHT - 110
 
 
 def lerp(a, b, t):
@@ -1002,6 +1018,7 @@ class GameView(arcade.View):
         self.scene = arcade.Scene()
         self.is_game_over = False
         self.ring_combo = 0
+        self.coin_combo = 0
 
         self.gui_camera = arcade.Camera2D()
 
@@ -1314,10 +1331,23 @@ class GameView(arcade.View):
             self.scene["Coins"],
         )
         for coin in coin_hits:
+            self.coin_combo += 1
             self._award_score(COIN_POINTS)
             self.events.emit(CoinCollected(
                 x=coin.center_x, y=coin.center_y, points=COIN_POINTS,
             ))
+            streak_bonus = scoring.coin_streak_bonus(
+                self.coin_combo,
+                COIN_STREAK_THRESHOLD,
+                COIN_STREAK_BASE_BONUS,
+                COIN_STREAK_BONUS_CAP,
+            )
+            if streak_bonus is not None:
+                self._award_score(streak_bonus)
+                self.events.emit(CoinStreakBonus(
+                    x=coin.center_x, y=coin.center_y,
+                    combo=self.coin_combo, bonus=streak_bonus,
+                ))
             coin.remove_from_sprite_lists()
 
         # Non-fatal: touching a caged wolf frees it for a big bonus.
@@ -1731,15 +1761,27 @@ class GameView(arcade.View):
         text.is_milestone = False
         self.floating_texts.append(text)
 
-    def spawn_celebration_text(self, message, color=MILESTONE_COLOR):
-        """ Big centered "grow + fade" celebration text. Used by milestones and
-        wolf rescues alike. """
+    def spawn_celebration_text(
+        self,
+        message,
+        color=MILESTONE_COLOR,
+        start_size=MILESTONE_TEXT_START_SIZE,
+        end_size=MILESTONE_TEXT_END_SIZE,
+        x=None,
+        y=None,
+    ):
+        """ Big centered "grow + fade" celebration text. Used by milestones,
+        wolf rescues, and coin streaks. ``start_size``/``end_size`` override
+        the default 80 → 140 ramp for callers whose message is too long to
+        fit at the default size. ``x``/``y`` override the default screen
+        center so banner-style stamps don't overlap each other when two fire
+        on the same frame. """
         text = arcade.Text(
             message,
-            x=WINDOW_WIDTH // 2,
-            y=WINDOW_HEIGHT // 2,
+            x=WINDOW_WIDTH // 2 if x is None else x,
+            y=WINDOW_HEIGHT // 2 if y is None else y,
             color=color,
-            font_size=MILESTONE_TEXT_START_SIZE,
+            font_size=start_size,
             anchor_x="center",
             anchor_y="center",
             bold=True,
@@ -1747,6 +1789,8 @@ class GameView(arcade.View):
         text.lifetime = MILESTONE_TEXT_LIFETIME
         text.base_rgb = tuple(color)[:3]
         text.is_milestone = True
+        text.start_size = start_size
+        text.end_size = end_size
         self.floating_texts.append(text)
 
     def spawn_milestone_text(self, value):
@@ -1773,6 +1817,11 @@ class GameView(arcade.View):
         bus.subscribe(MilestoneCrossed, lambda e: arcade.play_sound(
             self.milestone_sound, volume=MILESTONE_VOLUME,
         ))
+        bus.subscribe(CoinStreakBonus, lambda e: arcade.play_sound(
+            self.milestone_sound,
+            speed=COIN_STREAK_SOUND_SPEED,
+            volume=COIN_STREAK_SOUND_VOLUME,
+        ))
         bus.subscribe(GameOver, lambda e: arcade.play_sound(self.gameover_sound))
 
         # --- Floating / celebration text ---
@@ -1791,6 +1840,13 @@ class GameView(arcade.View):
             f"WOLF SAVED!  +{e.points}", WOLF_CELEBRATION_COLOR,
         ))
         bus.subscribe(MilestoneCrossed, lambda e: self.spawn_milestone_text(e.value))
+        bus.subscribe(CoinStreakBonus, lambda e: self.spawn_celebration_text(
+            f"COIN STREAK x{e.combo}!  +{e.bonus}",
+            COIN_STREAK_COLOR,
+            start_size=COIN_STREAK_TEXT_START_SIZE,
+            end_size=COIN_STREAK_TEXT_END_SIZE,
+            y=COIN_STREAK_TEXT_Y,
+        ))
 
         # --- Particle bursts ---
         bus.subscribe(RingCollected, lambda e: self.spawn_burst(e.x, e.y))
@@ -1821,9 +1877,7 @@ class GameView(arcade.View):
                 # Stays centered, grows from start to end size, fades over the
                 # whole lifetime. No vertical drift — it's a flashy stamp.
                 progress = 1.0 - (text.lifetime / MILESTONE_TEXT_LIFETIME)
-                text.font_size = lerp(
-                    MILESTONE_TEXT_START_SIZE, MILESTONE_TEXT_END_SIZE, progress,
-                )
+                text.font_size = lerp(text.start_size, text.end_size, progress)
                 alpha = int(255 * (text.lifetime / MILESTONE_TEXT_LIFETIME))
             else:
                 text.y += FLOATING_TEXT_RISE_SPEED
@@ -1940,6 +1994,8 @@ class GameView(arcade.View):
             coin.center_x -= PIPE_SPEED
             coin.texture = current_texture
             if coin.right < 0:
+                # Coin scrolled off uncollected — streak breaks.
+                self.coin_combo = 0
                 coin.remove_from_sprite_lists()
 
     def make_mountain(self, x):

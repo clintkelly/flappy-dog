@@ -69,6 +69,16 @@ class CoinCollected(Event):
 
 
 @dataclass(frozen=True)
+class CoinStreakBonus(Event):
+    """ Fired when the consecutive-coin streak crosses a threshold,
+    awarding an escalating bonus on top of the underlying CoinCollected. """
+    x: float
+    y: float
+    combo: int
+    bonus: int
+
+
+@dataclass(frozen=True)
 class WolfRescued(Event):
     x: float
     y: float

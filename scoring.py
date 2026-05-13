@@ -30,6 +30,27 @@ def combo_pitch(combo_count: int, pitch_step: float, pitch_max: float) -> float:
     return min(1.0 + (combo_count - 1) * pitch_step, pitch_max)
 
 
+def coin_streak_bonus(
+    combo_count: int,
+    threshold: int,
+    base_bonus: int,
+    cap: int,
+) -> int | None:
+    """ Escalating bonus for a coin streak. Returns the bonus to award when
+    ``combo_count`` crosses a multiple of ``threshold`` (e.g. every 10 coins
+    in a row), or ``None`` if no bonus fires this pickup.
+
+    Tier N awards ``base_bonus * 2**(N-1)``, clamped to ``cap``. So with
+    threshold=10, base=10, cap=80 the sequence is +10, +20, +40, +80, +80...
+    """
+    if threshold <= 0 or combo_count <= 0 or base_bonus <= 0:
+        return None
+    if combo_count % threshold != 0:
+        return None
+    tier = combo_count // threshold
+    return min(base_bonus * (2 ** (tier - 1)), cap)
+
+
 def crossed_milestone(old_score: int, new_score: int, threshold: int) -> int | None:
     """ Return the milestone value crossed by going from ``old_score`` to
     ``new_score``, or ``None`` if no multiple of ``threshold`` was crossed.

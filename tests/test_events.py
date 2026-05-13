@@ -6,6 +6,7 @@ import pytest
 
 from events import (
     CoinCollected,
+    CoinStreakBonus,
     EventBus,
     Event,
     GameOver,
@@ -164,6 +165,7 @@ def test_all_event_types_inherit_marker():
         ScoreZoneCleared,
         RingCollected,
         CoinCollected,
+        CoinStreakBonus,
         WolfRescued,
         GameOver,
     ):
