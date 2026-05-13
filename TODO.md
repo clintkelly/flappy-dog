@@ -89,11 +89,6 @@ is committed to any timeline.
 
 ## Architecture / tech debt
 
-- [ ] **Event bus** for scoring side-effects. Today each scoring site
-      open-codes sound + particles + floating text + milestone check.
-      An `events.emit("score", {bonus, x, y, combo})` channel with
-      subscribers would consolidate this and let achievements / music
-      hooks attach without touching the scoring sites.
 - [ ] **Sound mixer** — central master/SFX/music volumes; mute toggle.
       Currently `arcade.play_sound(...)` is scattered across ~10 sites
       with hard-coded volumes.
@@ -126,6 +121,9 @@ trajectory, not just what's missing.
   tight peak at score 30
 - State pattern for the player (Normal / Shielded / Invincible / Dashing)
 - Strategy pattern for motion (Linear / Sine / Circular)
+- Event bus for scoring side-effects (sound, particles, floating text,
+  milestone celebration, game over) — scoring sites emit typed events,
+  subscribers attach independently
 - Pure-Python extracted modules: `score_store`, `motion`,
   `player_state`, `difficulty`, `scoring`, `spawn_table`, `geometry`,
   `weather_state`, `animation`, `assets`

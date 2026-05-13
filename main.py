@@ -16,6 +16,15 @@ import geometry
 import scoring
 from animation import AnimationCycler
 from assets import AssetLibrary
+from events import (
+    CoinCollected,
+    EventBus,
+    GameOver,
+    MilestoneCrossed,
+    RingCollected,
+    ScoreZoneCleared,
+    WolfRescued,
+)
 from motion import CircularMotion, LinearMotion, SineMotion
 from player_state import NormalState, PlayerState
 from score_store import DEFAULT_PROFILE, ScoreStore
@@ -75,12 +84,12 @@ MAX_PIPE_SPACING = 360
 # Difficulty progression. Both the vertical gap and the horizontal spacing
 # scale by an interpolated factor: easier than base at score 0, then shrink
 # past base to a tougher peak as the score climbs to DIFFICULTY_RAMP_SCORE.
-# Higher *_AT_START = easier opening (e.g. 1.30 means gaps are 30% bigger than base).
+# Higher *_AT_START = easier opening (e.g. 1.55 means gaps are 55% bigger than base).
 # Lower *_AT_MAX_DIFFICULTY = harder peak (e.g. 0.65 = tightens to 65% of base).
-DIFFICULTY_RAMP_SCORE = 30
-GAP_RATIO_AT_START = 1.30
+DIFFICULTY_RAMP_SCORE = 60
+GAP_RATIO_AT_START = 1.55
 GAP_RATIO_AT_MAX_DIFFICULTY = 0.65
-SPACING_RATIO_AT_START = 1.20
+SPACING_RATIO_AT_START = 1.40
 SPACING_RATIO_AT_MAX_DIFFICULTY = 0.75
 
 PLAYER_ANIMATION_FRAME_DURATION = 0.05  # seconds per frame
@@ -99,8 +108,9 @@ COLUMN_TILE_RENDERED = COLUMN_TILE_SIZE * COLUMN_TILE_SCALE
 COLUMN_TILE_VERTICAL_OVERLAP = 6  # rendered pixels of overlap at tile seams
 
 # Cloud parallax layer.
-# All four visual properties are interpolated from depth=0 (near) to depth=1 (far).
-# Far clouds drift slowly, are smaller, more transparent, and tinted toward the sky.
+# Scale, drift speed, and tint are all interpolated from depth=0 (near) to depth=1 (far).
+# Far clouds drift slowly, are smaller, and tinted toward the sky; depth also drives
+# z-order so distant clouds draw behind near ones.
 NUM_CLOUDS = 8
 CLOUD_NEAR_SCALE = 3.0
 CLOUD_FAR_SCALE = 1.5
@@ -984,6 +994,11 @@ class GameView(arcade.View):
         self.ring_cycler = AnimationCycler(self.ring_textures, RING_ANIMATION_FRAME_DURATION)
         self.coin_cycler = AnimationCycler(self.coin_textures, COIN_ANIMATION_FRAME_DURATION)
 
+        # Event bus: scoring sites emit typed events; sound + visuals
+        # subscribe independently. See _wire_event_subscribers below.
+        self.events = EventBus()
+        self._wire_event_subscribers()
+
         self.scene = arcade.Scene()
         self.is_game_over = False
         self.ring_combo = 0
@@ -1275,27 +1290,23 @@ class GameView(arcade.View):
         for score_zone in score_zone_hits:
             score_zone.remove_from_sprite_lists()
             self._award_score(1)
-            arcade.play_sound(self.coin_sound)
-            # Spawn the floating text at the bird so it's visible regardless of
-            # the score zone's height (boulder zones span the whole window).
-            self.spawn_floating_text(
-                self.player_sprite.center_x,
-                self.player_sprite.center_y,
-                "+1",
-            )
+            self.events.emit(ScoreZoneCleared(
+                x=self.player_sprite.center_x,
+                y=self.player_sprite.center_y,
+            ))
 
         ring_hits = arcade.check_for_collision_with_list(
             self.player_sprite,
             self.scene["Rings"],
         )
         for ring in ring_hits:
-            self.spawn_burst(ring.center_x, ring.center_y)
             self.ring_combo += 1
             bonus = scoring.combo_bonus(self.ring_combo, RING_POINTS, RING_COMBO_BONUS_STEP)
             self._award_score(bonus)
-            self.spawn_floating_text(ring.center_x, ring.center_y, f"+{bonus}")
-            pitch = scoring.combo_pitch(self.ring_combo, RING_PITCH_STEP, RING_PITCH_MAX)
-            arcade.play_sound(self.ring_sound, speed=pitch)
+            self.events.emit(RingCollected(
+                x=ring.center_x, y=ring.center_y,
+                combo=self.ring_combo, bonus=bonus,
+            ))
             ring.remove_from_sprite_lists()
 
         coin_hits = arcade.check_for_collision_with_list(
@@ -1303,10 +1314,10 @@ class GameView(arcade.View):
             self.scene["Coins"],
         )
         for coin in coin_hits:
-            self.spawn_burst(coin.center_x, coin.center_y, count=COIN_PARTICLES_PER_BURST)
             self._award_score(COIN_POINTS)
-            self.spawn_floating_text(coin.center_x, coin.center_y, f"+{COIN_POINTS}")
-            arcade.play_sound(self.coin_sound)
+            self.events.emit(CoinCollected(
+                x=coin.center_x, y=coin.center_y, points=COIN_POINTS,
+            ))
             coin.remove_from_sprite_lists()
 
         # Non-fatal: touching a caged wolf frees it for a big bonus.
@@ -1343,7 +1354,7 @@ class GameView(arcade.View):
         self.game_over_score_text.text = f"Final score: {self.score}"
         self.game_over_best_text.text = f"Personal best: {new_best}"
         self.game_over_time = 0.0  # restart the input-cooldown clock
-        arcade.play_sound(self.gameover_sound)
+        self.events.emit(GameOver(score=self.score))
 
 
     def should_generate_new_pipe(self):
@@ -1741,16 +1752,64 @@ class GameView(arcade.View):
     def spawn_milestone_text(self, value):
         self.spawn_celebration_text(f"{value}!", MILESTONE_COLOR)
 
+    def _wire_event_subscribers(self):
+        """ Register every visual / audio side effect against the event bus.
+
+        Each handler does ONE thing (a sound, a particle burst, a floating
+        text) so future subscribers — achievements, music ducking, stats —
+        can attach without touching this code path or any scoring site. """
+        bus = self.events
+
+        # --- Sounds ---
+        bus.subscribe(ScoreZoneCleared, lambda e: arcade.play_sound(self.coin_sound))
+        bus.subscribe(CoinCollected, lambda e: arcade.play_sound(self.coin_sound))
+        bus.subscribe(RingCollected, lambda e: arcade.play_sound(
+            self.ring_sound,
+            speed=scoring.combo_pitch(e.combo, RING_PITCH_STEP, RING_PITCH_MAX),
+        ))
+        bus.subscribe(WolfRescued, lambda e: arcade.play_sound(
+            self.howl_sound, volume=WOLF_HOWL_VOLUME,
+        ))
+        bus.subscribe(MilestoneCrossed, lambda e: arcade.play_sound(
+            self.milestone_sound, volume=MILESTONE_VOLUME,
+        ))
+        bus.subscribe(GameOver, lambda e: arcade.play_sound(self.gameover_sound))
+
+        # --- Floating / celebration text ---
+        # Score-zone text spawns at the bird so it's visible regardless of
+        # the zone's height (boulder zones span the whole window).
+        bus.subscribe(ScoreZoneCleared, lambda e: self.spawn_floating_text(
+            self.player_sprite.center_x, self.player_sprite.center_y, "+1",
+        ))
+        bus.subscribe(RingCollected, lambda e: self.spawn_floating_text(
+            e.x, e.y, f"+{e.bonus}",
+        ))
+        bus.subscribe(CoinCollected, lambda e: self.spawn_floating_text(
+            e.x, e.y, f"+{e.points}",
+        ))
+        bus.subscribe(WolfRescued, lambda e: self.spawn_celebration_text(
+            f"WOLF SAVED!  +{e.points}", WOLF_CELEBRATION_COLOR,
+        ))
+        bus.subscribe(MilestoneCrossed, lambda e: self.spawn_milestone_text(e.value))
+
+        # --- Particle bursts ---
+        bus.subscribe(RingCollected, lambda e: self.spawn_burst(e.x, e.y))
+        bus.subscribe(CoinCollected, lambda e: self.spawn_burst(
+            e.x, e.y, count=COIN_PARTICLES_PER_BURST,
+        ))
+        bus.subscribe(WolfRescued, lambda e: self.spawn_burst(
+            e.x, e.y, count=WOLF_PARTICLES_PER_BURST, colors=WOLF_PARTICLE_COLORS,
+        ))
+
     def _award_score(self, points):
-        """ Add points, refresh the HUD, and fire a milestone celebration when
-        the new total crosses a multiple of MILESTONE_THRESHOLD. """
+        """ Add points, refresh the HUD, and emit a MilestoneCrossed event
+        when the new total crosses a multiple of MILESTONE_THRESHOLD. """
         old = self.score
         self.score += points
         self.score_text.text = f"Score: {self.score}"
         milestone = scoring.crossed_milestone(old, self.score, MILESTONE_THRESHOLD)
         if milestone is not None:
-            self.spawn_milestone_text(milestone)
-            arcade.play_sound(self.milestone_sound, volume=MILESTONE_VOLUME)
+            self.events.emit(MilestoneCrossed(value=milestone))
 
     def update_floating_texts(self, delta_time):
         for text in self.floating_texts[:]:
@@ -1868,13 +1927,9 @@ class GameView(arcade.View):
         wolf.texture = self.wolf_howling_texture
         wolf.freed_velocity_y = WOLF_FREED_INITIAL_VELOCITY
         self._award_score(WOLF_POINTS)
-        arcade.play_sound(self.howl_sound, volume=WOLF_HOWL_VOLUME)
-        self.spawn_burst(
-            wolf.center_x, wolf.center_y,
-            count=WOLF_PARTICLES_PER_BURST,
-            colors=WOLF_PARTICLE_COLORS,
-        )
-        self.spawn_celebration_text(f"WOLF SAVED!  +{WOLF_POINTS}", WOLF_CELEBRATION_COLOR)
+        self.events.emit(WolfRescued(
+            x=wolf.center_x, y=wolf.center_y, points=WOLF_POINTS,
+        ))
 
     def move_coins(self, delta_time):
         # Shared spin animation, like rings — every coin shows the same frame.
