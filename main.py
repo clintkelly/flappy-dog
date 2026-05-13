@@ -14,6 +14,8 @@ import random
 import difficulty
 import geometry
 import scoring
+from animation import AnimationCycler
+from assets import AssetLibrary
 from motion import CircularMotion, LinearMotion, SineMotion
 from player_state import NormalState, PlayerState
 from score_store import DEFAULT_PROFILE, ScoreStore
@@ -529,12 +531,9 @@ class TitleView(arcade.View):
 
     def __init__(self):
         super().__init__()
-        self.title_image = arcade.Sprite(
-            arcade.load_texture(ASSET_DIR / "title.png"),
-            scale=3,
-        )
-        self.title_image.center_x = WINDOW_WIDTH // 2
-        self.title_image.center_y = WINDOW_HEIGHT // 2
+        # title_image needs the AssetLibrary which lives on the window;
+        # built lazily in on_show_view since self.window isn't set yet.
+        self.title_image: arcade.Sprite | None = None
 
         self.title_text = arcade.Text(
             "SKYWING RUINS",
@@ -583,6 +582,13 @@ class TitleView(arcade.View):
         )
 
     def on_show_view(self):
+        if self.title_image is None:
+            self.title_image = arcade.Sprite(
+                self.window.assets.title_texture,
+                scale=3,
+            )
+            self.title_image.center_x = WINDOW_WIDTH // 2
+            self.title_image.center_y = WINDOW_HEIGHT // 2
         store = self.window.score_store
         self.high_score_text.text = f"HIGH SCORE: {store.all_time_best()}"
         self.profile_text.text = f"PROFILE: {store.current_profile}"
@@ -921,117 +927,65 @@ class GameView(arcade.View):
 
     def __init__(self):
         super().__init__()
-
-        # Will eventually have all of the sprites
+        # Nothing asset-related happens here — self.window isn't available
+        # until arcade calls show_view. setup() runs once from on_show_view
+        # and pulls everything from self.window.assets.
         self.scene = None
+        self._setup_complete = False
 
-        self.player_textures = [
-            arcade.load_texture(path)
-            for path in sorted(ASSET_DIR.glob("bird_*.png"))
-        ]
+    def on_show_view(self):
+        if not self._setup_complete:
+            self.setup()
+            self._setup_complete = True
 
-        # Column tiles use detailed hit boxes so collision tracks the visible art,
-        # not the transparent padding around it.
-        self.column_ceiling_cap_textures = [
-            arcade.load_texture(p, hit_box_algorithm=arcade.hitbox.algo_detailed)
-            for p in sorted(ASSET_DIR.glob("column_ceiling_cap_*.png"))
-        ]
-        self.column_floor_cap_textures = [
-            arcade.load_texture(p, hit_box_algorithm=arcade.hitbox.algo_detailed)
-            for p in sorted(ASSET_DIR.glob("column_floor_cap_*.png"))
-        ]
-        self.column_mid_textures = [
-            arcade.load_texture(p, hit_box_algorithm=arcade.hitbox.algo_detailed)
-            for p in sorted(ASSET_DIR.glob("column_mid_*.png"))
-        ]
+    def setup(self):
+        """ Called once when this GameView is first shown. Loads asset
+        references off the window-owned AssetLibrary and initializes the
+        full game state. Each new game gets a fresh GameView, so 'reset'
+        is implicit — there's no need to support a second call. """
+        assets = self.window.assets
 
-        self.boulder_textures = [
-            arcade.load_texture(p, hit_box_algorithm=arcade.hitbox.algo_detailed)
-            for p in sorted(ASSET_DIR.glob("boulder*.png"))
-        ]
+        # Texture references (just aliases — AssetLibrary owns the actual textures).
+        self.player_textures = assets.bird_textures
+        self.column_ceiling_cap_textures = assets.column_ceiling_cap_textures
+        self.column_floor_cap_textures = assets.column_floor_cap_textures
+        self.column_mid_textures = assets.column_mid_textures
+        self.boulder_textures = assets.boulder_textures
+        self.ring_textures = assets.ring_textures
+        self.coin_textures = assets.coin_textures
+        self.cloud_textures = assets.cloud_textures
+        self.mountain_texture = assets.mountain_texture
+        self.wolf_standing_texture = assets.wolf_standing_texture
+        self.wolf_howling_texture = assets.wolf_howling_texture
+        self.spiky_ball_texture = assets.spiky_ball_texture
 
-        # Rings are named ring1.png .. ring16.png — sort numerically so the spin animates smoothly.
-        ring_paths = sorted(
-            ASSET_DIR.glob("ring*.png"),
-            key=lambda p: int(p.stem.replace("ring", "")),
-        )
-        self.ring_textures = [arcade.load_texture(p) for p in ring_paths]
+        # Sounds
+        self.jump_sound = assets.jump_sound
+        self.gameover_sound = assets.gameover_sound
+        self.coin_sound = assets.coin_sound
+        self.ring_sound = assets.ring_sound
+        self.milestone_sound = assets.milestone_sound
+        self.howl_sound = assets.howl_sound
 
-        # Coins ship as the first half of a rotation (face -> side); the second half is
-        # built by horizontally flipping the frames in reverse so the spin loops smoothly.
-        coin_paths = sorted(
-            ASSET_DIR.glob("coin*.png"),
-            key=lambda p: int(p.stem.replace("coin", "")),
-        )
-        forward = [arcade.load_texture(p) for p in coin_paths]
-        backward = [t.flip_left_right() for t in reversed(forward[:-1])]
-        self.coin_textures = forward + backward
-
-        self.cloud_textures = [
-            arcade.load_texture(p)
-            for p in sorted(ASSET_DIR.glob("cloud*.png"))
-        ]
-
-        self.mountain_texture = arcade.load_texture(ASSET_DIR / "mountain.png")
-
-        # Static sky background. Native 320x180 scaled 4x to fill the 1280x720 window.
-        self.sky_sprite = arcade.Sprite(
-            arcade.load_texture(ASSET_DIR / "sky.png"),
-            scale=4,
-        )
+        # Static sky background sprite (rebuilt per GameView — cheap).
+        self.sky_sprite = arcade.Sprite(assets.sky_texture, scale=4)
         self.sky_sprite.center_x = WINDOW_WIDTH // 2
         self.sky_sprite.center_y = WINDOW_HEIGHT // 2
 
-        self.jump_sound = arcade.load_sound(":resources:sounds/jump1.wav")
-        self.gameover_sound = arcade.load_sound(":resources:sounds/gameover1.wav")
-        self.coin_sound = arcade.load_sound(":resources:sounds/coin1.wav")
-        self.ring_sound = arcade.load_sound(":resources:sounds/upgrade1.wav")
-        self.milestone_sound = arcade.load_sound(":resources:sounds/secret2.wav")
-        self.howl_sound = arcade.load_sound(ASSET_DIR / "howl.wav")
-
-        self.wolf_standing_texture = arcade.load_texture(ASSET_DIR / "wolf_standing.png")
-        self.wolf_howling_texture = arcade.load_texture(ASSET_DIR / "wolf_howling.png")
-        self.spiky_ball_texture = arcade.load_texture(
-            ASSET_DIR / "spiky_ball.png",
-            hit_box_algorithm=arcade.hitbox.algo_detailed,
-        )
-
-        # Weather: rain + thunderstorm cycle. Both sound files are optional;
-        # drop assets/rain.{wav,ogg,mp3} and/or assets/thunder.{wav,ogg,mp3}
-        # into the assets dir to enable them. Visuals come up either way.
-        def _load_optional(stem):
-            for ext in ("wav", "ogg", "mp3"):
-                hits = list(ASSET_DIR.glob(f"{stem}.{ext}"))
-                if hits:
-                    return arcade.load_sound(hits[0])
-            return None
-
+        # Weather: rain + thunderstorm cycle (sounds optional).
         self.weather = WeatherController(
-            rain_sound=_load_optional("rain"),
-            thunder_sound=_load_optional("thunder"),
+            rain_sound=assets.rain_sound,
+            thunder_sound=assets.thunder_sound,
         )
 
-        self.gui_camera = None
-        self.score = 0
-        self.score_text = None
-        self.is_game_over = False
-        self.moving_horizontally = False
+        # Animation cyclers replace the duplicated frame/time/wrap state
+        # that used to live on the view for bird/ring/coin separately.
+        self.bird_cycler = AnimationCycler(self.player_textures, PLAYER_ANIMATION_FRAME_DURATION)
+        self.ring_cycler = AnimationCycler(self.ring_textures, RING_ANIMATION_FRAME_DURATION)
+        self.coin_cycler = AnimationCycler(self.coin_textures, COIN_ANIMATION_FRAME_DURATION)
 
-        self.setup()
-
-
-    def setup(self):
-        """ Called whenever the game starts / resets """
-        
         self.scene = arcade.Scene()
         self.is_game_over = False
-
-        self.animation_frame = 0
-        self.animation_time = 0.0
-        self.ring_animation_frame = 0
-        self.ring_animation_time = 0.0
-        self.coin_animation_frame = 0
-        self.coin_animation_time = 0.0
         self.ring_combo = 0
 
         self.gui_camera = arcade.Camera2D()
@@ -1270,11 +1224,8 @@ class GameView(arcade.View):
             self.player_sprite.change_y = 0
 
         # Cycle through the animation frames
-        self.animation_time += delta_time
-        if self.animation_time >= PLAYER_ANIMATION_FRAME_DURATION:
-            self.animation_time -= PLAYER_ANIMATION_FRAME_DURATION
-            self.animation_frame = (self.animation_frame + 1) % len(self.player_textures)
-            self.player_sprite.texture = self.player_textures[self.animation_frame]
+        self.bird_cycler.tick(delta_time)
+        self.player_sprite.texture = self.bird_cycler.current
         if self.player_sprite.change_x > 0 and not self.moving_horizontally:
             self.player_sprite.change_x -= PLAYER_X_FRICTION
             self.player_sprite.change_x = max(self.player_sprite.change_x, 0)
@@ -1826,11 +1777,8 @@ class GameView(arcade.View):
 
     def move_rings(self, delta_time):
         # Advance the shared spin animation once per frame.
-        self.ring_animation_time += delta_time
-        if self.ring_animation_time >= RING_ANIMATION_FRAME_DURATION:
-            self.ring_animation_time -= RING_ANIMATION_FRAME_DURATION
-            self.ring_animation_frame = (self.ring_animation_frame + 1) % len(self.ring_textures)
-        current_texture = self.ring_textures[self.ring_animation_frame]
+        self.ring_cycler.tick(delta_time)
+        current_texture = self.ring_cycler.current
 
         for ring in self.scene.get_sprite_list("Rings"):
             ring.motion.update(ring, delta_time)
@@ -1930,11 +1878,8 @@ class GameView(arcade.View):
 
     def move_coins(self, delta_time):
         # Shared spin animation, like rings — every coin shows the same frame.
-        self.coin_animation_time += delta_time
-        if self.coin_animation_time >= COIN_ANIMATION_FRAME_DURATION:
-            self.coin_animation_time -= COIN_ANIMATION_FRAME_DURATION
-            self.coin_animation_frame = (self.coin_animation_frame + 1) % len(self.coin_textures)
-        current_texture = self.coin_textures[self.coin_animation_frame]
+        self.coin_cycler.tick(delta_time)
+        current_texture = self.coin_cycler.current
 
         for coin in self.scene.get_sprite_list("Coins"):
             coin.center_x -= PIPE_SPEED
@@ -2109,12 +2054,28 @@ def _setup_gamepad(window):
     return controller
 
 
+class SkywingWindow(arcade.Window):
+    """ The game's arcade.Window subclass. Holds the global game state
+    (score store, asset library, gamepad) as typed attributes so views can
+    access them via ``self.window.score_store`` / ``self.window.assets``
+    without duck-typing surprises.
+    """
+
+    score_store: ScoreStore
+    assets: AssetLibrary
+
+    def __init__(self, score_store: ScoreStore):
+        super().__init__(WINDOW_WIDTH, WINDOW_HEIGHT, WINDOW_TITLE)
+        self.background_color = arcade.color.SKY_BLUE
+        self.score_store = score_store
+        # Load assets AFTER super().__init__ so the GL context is ready.
+        self.assets = AssetLibrary(ASSET_DIR)
+
+
 def main():
     """ Main method """
     score_store = ScoreStore.load(SCORES_PATH)
-    window = arcade.Window(WINDOW_WIDTH, WINDOW_HEIGHT, WINDOW_TITLE)
-    window.background_color = arcade.color.SKY_BLUE
-    window.score_store = score_store
+    window = SkywingWindow(score_store)
     _setup_gamepad(window)
     window.show_view(TitleView())
     arcade.run()
