@@ -14,7 +14,7 @@ import random
 import difficulty
 import geometry
 import scoring
-from motion import CircularMotion
+from motion import CircularMotion, LinearMotion, SineMotion
 from player_state import NormalState, PlayerState
 from score_store import DEFAULT_PROFILE, ScoreStore
 from spawn_table import SpawnTable
@@ -1398,14 +1398,19 @@ class GameView(arcade.View):
     def should_generate_new_pipe(self):
         # Look at the rightmost sprite across all spawnable slots so spacing is
         # consistent regardless of which kind was spawned last. For orbiting
-        # obstacles, use the orbit center (motion.base_x) rather than the
-        # current oscillating center_x.
+        # obstacles, prefer the orbit center (motion.base_x) over the
+        # currently-oscillating center_x — motions that don't track a
+        # horizontal anchor fall back to center_x.
         last_x = -float("inf")
         for list_name in ("Pipes", "Boulders", "Rings", "OrbitObstacles"):
             sprites = self.scene.get_sprite_list(list_name)
             if sprites:
                 anchor = sprites[-1]
-                x = anchor.motion.base_x if hasattr(anchor, "motion") else anchor.center_x
+                motion = getattr(anchor, "motion", None)
+                if motion is not None and hasattr(motion, "base_x"):
+                    x = motion.base_x
+                else:
+                    x = anchor.center_x
                 last_x = max(last_x, x)
         if last_x == -float("inf"):
             return True
@@ -1505,6 +1510,7 @@ class GameView(arcade.View):
             score_zone.center_x = column_x + SCORE_ZONE_X_OFFSET
             score_zone.center_y = WINDOW_HEIGHT // 2
             score_zone.visible = False
+            score_zone.motion = LinearMotion(vx=-PIPE_SPEED)
             self.scene.add_sprite("ScoreZones", score_zone)
             # Make the next column reachable from the ball's orbit center.
             self.next_gap_center_bias = ball.motion.base_y
@@ -1528,6 +1534,7 @@ class GameView(arcade.View):
             score_zone.center_x = column_x + SCORE_ZONE_X_OFFSET
             score_zone.center_y = WINDOW_HEIGHT // 2
             score_zone.visible = False
+            score_zone.motion = LinearMotion(vx=-PIPE_SPEED)
             self.scene.add_sprite("ScoreZones", score_zone)
             # Risk-reward: a static bonus ring near the floor, tempting the player to
             # fly *under* the boulder instead of over it.
@@ -1579,15 +1586,22 @@ class GameView(arcade.View):
             middle_pipe = self.make_middle_pipe(column_x, gap_center, gap_size)
 
             sprites = top_tiles + bottom_tiles + [middle_pipe]
-            if oscillating:
-                # Attach oscillation attrs to every tile and the score zone so they move as one.
-                initial_offset = amplitude * math.sin(phase)
-                for sprite in sprites:
-                    sprite.base_y = sprite.center_y
-                    sprite.amplitude = amplitude
-                    sprite.phase = phase
-                    sprite.phase_speed = phase_speed
-                    sprite.center_y = sprite.base_y + initial_offset
+            # Every column tile + score zone gets a Motion. Static columns
+            # use LinearMotion; oscillating columns use SineMotion with all
+            # tiles sharing the same amplitude/phase_speed/phase so they bob
+            # in lock-step.
+            for sprite in sprites:
+                if oscillating:
+                    sprite.motion = SineMotion(
+                        base_y=sprite.center_y,
+                        amplitude=amplitude,
+                        phase_speed=phase_speed,
+                        phase=phase,
+                        vx=-PIPE_SPEED,
+                    )
+                    sprite.motion.place(sprite)
+                else:
+                    sprite.motion = LinearMotion(vx=-PIPE_SPEED)
 
             for tile in top_tiles + bottom_tiles:
                 self.scene.add_sprite("Pipes", tile)
@@ -1608,13 +1622,11 @@ class GameView(arcade.View):
 
 
     def move_and_remove_existing_pipes(self, delta_time):
+        # Every pipe + score zone has a Motion (LinearMotion for static,
+        # SineMotion for oscillating); the loop is uniform.
         for sprite_list_name in ("Pipes", "ScoreZones"):
             for pipe in self.scene.get_sprite_list(sprite_list_name):
-                pipe.center_x -= PIPE_SPEED
-                # Oscillating pipes carry phase/amplitude/base_y attrs set in spawn_pipes.
-                if hasattr(pipe, "phase_speed") and pipe.phase_speed:
-                    pipe.phase += pipe.phase_speed * delta_time
-                    pipe.center_y = pipe.base_y + pipe.amplitude * math.sin(pipe.phase)
+                pipe.motion.update(pipe, delta_time)
                 if pipe.right < 0:
                     pipe.remove_from_sprite_lists()
 
@@ -1640,18 +1652,19 @@ class GameView(arcade.View):
             scale=BOULDER_SCALE,
         )
         boulder.center_x = x
-        boulder.base_y = random.randint(base_y_min, BOULDER_BASE_Y_MAX)
-        boulder.amplitude = amplitude
-        boulder.phase = random.uniform(0, 2 * math.pi)
-        boulder.phase_speed = random.uniform(BOULDER_PHASE_SPEED_MIN, BOULDER_PHASE_SPEED_MAX)
-        boulder.center_y = boulder.base_y + boulder.amplitude * math.sin(boulder.phase)
+        boulder.motion = SineMotion(
+            base_y=random.randint(base_y_min, BOULDER_BASE_Y_MAX),
+            amplitude=amplitude,
+            phase_speed=random.uniform(BOULDER_PHASE_SPEED_MIN, BOULDER_PHASE_SPEED_MAX),
+            phase=random.uniform(0, 2 * math.pi),
+            vx=-PIPE_SPEED,
+        )
+        boulder.motion.place(boulder)
         return boulder
 
     def move_boulders(self, delta_time):
         for boulder in self.scene.get_sprite_list("Boulders"):
-            boulder.center_x -= PIPE_SPEED
-            boulder.phase += boulder.phase_speed * delta_time
-            boulder.center_y = boulder.base_y + boulder.amplitude * math.sin(boulder.phase)
+            boulder.motion.update(boulder, delta_time)
             if boulder.right < 0:
                 boulder.remove_from_sprite_lists()
 
@@ -1687,22 +1700,28 @@ class GameView(arcade.View):
     def make_ring(self, x):
         ring = arcade.Sprite(self.ring_textures[0], scale=RING_SCALE)
         ring.center_x = x
-        ring.base_y = random.randint(RING_BASE_Y_MIN, RING_BASE_Y_MAX)
-        ring.amplitude = random.randint(RING_AMPLITUDE_MIN, RING_AMPLITUDE_MAX)
-        ring.phase = random.uniform(0, 2 * math.pi)
-        ring.phase_speed = random.uniform(RING_PHASE_SPEED_MIN, RING_PHASE_SPEED_MAX)
-        ring.center_y = ring.base_y + ring.amplitude * math.sin(ring.phase)
+        ring.motion = SineMotion(
+            base_y=random.randint(RING_BASE_Y_MIN, RING_BASE_Y_MAX),
+            amplitude=random.randint(RING_AMPLITUDE_MIN, RING_AMPLITUDE_MAX),
+            phase_speed=random.uniform(RING_PHASE_SPEED_MIN, RING_PHASE_SPEED_MAX),
+            phase=random.uniform(0, 2 * math.pi),
+            vx=-PIPE_SPEED,
+        )
+        ring.motion.place(ring)
         return ring
 
     def make_bonus_ring(self, x):
-        """ Static low-altitude ring used as a risk-reward pickup under boulders. """
+        """ Static low-altitude ring used as a risk-reward pickup under boulders.
+        Uses SineMotion with amplitude=0 for a pinned y. """
         ring = arcade.Sprite(self.ring_textures[0], scale=RING_SCALE)
         ring.center_x = x
-        ring.center_y = random.randint(BONUS_RING_Y_MIN, BONUS_RING_Y_MAX)
-        ring.base_y = ring.center_y
-        ring.amplitude = 0
-        ring.phase = 0
-        ring.phase_speed = 0
+        ring.motion = SineMotion(
+            base_y=random.randint(BONUS_RING_Y_MIN, BONUS_RING_Y_MAX),
+            amplitude=0,
+            phase_speed=0,
+            vx=-PIPE_SPEED,
+        )
+        ring.motion.place(ring)
         return ring
 
     def spawn_burst(self, x, y, count=PARTICLES_PER_BURST, colors=PARTICLE_COLORS):
@@ -1814,9 +1833,7 @@ class GameView(arcade.View):
         current_texture = self.ring_textures[self.ring_animation_frame]
 
         for ring in self.scene.get_sprite_list("Rings"):
-            ring.center_x -= PIPE_SPEED
-            ring.phase += ring.phase_speed * delta_time
-            ring.center_y = ring.base_y + ring.amplitude * math.sin(ring.phase)
+            ring.motion.update(ring, delta_time)
             ring.texture = current_texture
             if ring.right < 0:
                 # Ring scrolled off without being collected — combo breaks.

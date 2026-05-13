@@ -76,3 +76,38 @@ class CircularMotion(Motion):
         self.base_y += self.vy
         self.phase += self.angular_speed * delta_time
         self.place(sprite)
+
+
+class SineMotion(Motion):
+    """ Scroll horizontally at a constant per-frame velocity while bobbing
+    vertically on a sine wave around ``base_y``.
+
+    Used by floating obstacles (boulders, oscillating column gaps, animated
+    rings) that all share the same kind of motion. ``amplitude == 0`` is a
+    legal "still" configuration that effectively reduces to LinearMotion;
+    that's how the bonus ring near the floor works.
+    """
+
+    def __init__(
+        self,
+        base_y: float,
+        amplitude: float,
+        phase_speed: float,
+        phase: float = 0.0,
+        vx: float = 0.0,
+    ):
+        self.base_y = base_y
+        self.amplitude = amplitude
+        self.phase_speed = phase_speed
+        self.phase = phase
+        self.vx = vx
+
+    def place(self, sprite) -> None:
+        """ Snap the sprite's y to the current sine position without
+        advancing the phase. The x stays where the caller set it. """
+        sprite.center_y = self.base_y + self.amplitude * math.sin(self.phase)
+
+    def update(self, sprite, delta_time: float) -> None:
+        sprite.center_x += self.vx
+        self.phase += self.phase_speed * delta_time
+        sprite.center_y = self.base_y + self.amplitude * math.sin(self.phase)
