@@ -248,6 +248,29 @@ WOLF_CELEBRATION_COLOR = arcade.color.CYAN
 # delta of the wolf's altitude so the player can actually reach it.
 WOLF_REACHABLE_DELTA_Y = 200
 
+# Trail particles — emitted by moving objects to make their motion easier to
+# read. Differ from spawn_burst particles in three ways: no velocity (each
+# particle sits where it was emitted), no gravity (no downward drift), and
+# a shorter lifetime so the trail stays compact instead of smearing.
+SPIKY_BALL_TRAIL_INTERVAL = 0.03    # seconds between particles (~33/sec)
+SPIKY_BALL_TRAIL_LIFETIME = 0.85
+SPIKY_BALL_TRAIL_RADIUS_MIN = 6
+SPIKY_BALL_TRAIL_RADIUS_MAX = 11
+SPIKY_BALL_TRAIL_COLORS = (
+    arcade.color.ORANGE,
+    arcade.color.YELLOW,
+    arcade.color.RED,
+)
+WOLF_TRAIL_INTERVAL = 0.035
+WOLF_TRAIL_LIFETIME = 0.75
+WOLF_TRAIL_RADIUS_MIN = 8
+WOLF_TRAIL_RADIUS_MAX = 14
+WOLF_TRAIL_COLORS = (
+    arcade.color.GOLD,
+    arcade.color.YELLOW,
+    arcade.color.WHITE,
+)
+
 # Spiky-ball obstacle. Uses the new Motion strategy (CircularMotion) — the
 # ball orbits a base point at a fixed radius while the base scrolls leftward.
 SPIKY_BALL_SPAWN_CHANCE = 0.06
@@ -1735,15 +1758,25 @@ class GameView(arcade.View):
         )
         motion.place(ball)
         ball.motion = motion
+        ball.trail_timer = 0.0
         return ball
 
     def move_orbit_obstacles(self, delta_time):
         """ Advance each orbit obstacle via its Motion strategy, spin the
-        sprite visually, and cull when the orbit center is fully past the
-        left edge. """
+        sprite visually, emit a trail particle on a fixed interval, and cull
+        when the orbit center is fully past the left edge. """
         for obstacle in self.scene.get_sprite_list("OrbitObstacles"):
             obstacle.motion.update(obstacle, delta_time)
             obstacle.angle += SPIKY_BALL_SPIN_DEGREES_PER_FRAME
+            obstacle.trail_timer += delta_time
+            while obstacle.trail_timer >= SPIKY_BALL_TRAIL_INTERVAL:
+                obstacle.trail_timer -= SPIKY_BALL_TRAIL_INTERVAL
+                self.spawn_trail_particle(
+                    obstacle.center_x, obstacle.center_y,
+                    SPIKY_BALL_TRAIL_COLORS,
+                    SPIKY_BALL_TRAIL_RADIUS_MIN, SPIKY_BALL_TRAIL_RADIUS_MAX,
+                    SPIKY_BALL_TRAIL_LIFETIME,
+                )
             if obstacle.motion.base_x + obstacle.motion.radius < 0:
                 obstacle.remove_from_sprite_lists()
 
@@ -1875,18 +1908,36 @@ class GameView(arcade.View):
             particle.change_x = math.cos(angle) * speed
             particle.change_y = math.sin(angle) * speed
             particle.lifetime = PARTICLE_LIFETIME
+            particle.max_lifetime = PARTICLE_LIFETIME
+            particle.gravity = PARTICLE_GRAVITY
             self.scene.add_sprite("Particles", particle)
+
+    def spawn_trail_particle(self, x, y, colors, radius_min, radius_max, lifetime):
+        """ Drop one stationary, gravity-free particle at (x, y). Used to mark
+        the recent path of a moving object (spiky ball, freed wolf). """
+        particle = arcade.SpriteCircle(
+            radius=random.randint(radius_min, radius_max),
+            color=random.choice(colors),
+        )
+        particle.center_x = x
+        particle.center_y = y
+        particle.change_x = 0
+        particle.change_y = 0
+        particle.lifetime = lifetime
+        particle.max_lifetime = lifetime
+        particle.gravity = 0.0
+        self.scene.add_sprite("Particles", particle)
 
     def update_particles(self, delta_time):
         for particle in self.scene.get_sprite_list("Particles"):
-            particle.change_y -= PARTICLE_GRAVITY
+            particle.change_y -= particle.gravity
             particle.center_x += particle.change_x
             particle.center_y += particle.change_y
             particle.lifetime -= delta_time
             if particle.lifetime <= 0:
                 particle.remove_from_sprite_lists()
             else:
-                particle.alpha = int(255 * (particle.lifetime / PARTICLE_LIFETIME))
+                particle.alpha = int(255 * (particle.lifetime / particle.max_lifetime))
 
     def spawn_floating_text(self, x, y, message, color=None):
         if color is None:
@@ -2096,6 +2147,17 @@ class GameView(arcade.View):
                 wolf.center_y += wolf.freed_velocity_y * delta_time
                 wolf.center_x -= PIPE_SPEED
                 wolf.freed_timer += delta_time
+                # Sparkle trail puffing out below the ascending wolf.
+                wolf.trail_timer += delta_time
+                while wolf.trail_timer >= WOLF_TRAIL_INTERVAL:
+                    wolf.trail_timer -= WOLF_TRAIL_INTERVAL
+                    self.spawn_trail_particle(
+                        wolf.center_x + random.uniform(-12, 12),
+                        wolf.center_y - random.uniform(20, 40),
+                        WOLF_TRAIL_COLORS,
+                        WOLF_TRAIL_RADIUS_MIN, WOLF_TRAIL_RADIUS_MAX,
+                        WOLF_TRAIL_LIFETIME,
+                    )
                 if (wolf.freed_timer >= WOLF_FREED_LIFETIME
                         or wolf.bottom > WINDOW_HEIGHT):
                     self.wolves.remove(wolf)
@@ -2136,6 +2198,7 @@ class GameView(arcade.View):
         wolf.state = "freed"
         wolf.texture = self.wolf_howling_texture
         wolf.freed_velocity_y = WOLF_FREED_INITIAL_VELOCITY
+        wolf.trail_timer = 0.0
         self._award_score(WOLF_POINTS)
         self.events.emit(WolfRescued(
             x=wolf.center_x, y=wolf.center_y, points=WOLF_POINTS,
