@@ -277,6 +277,9 @@ FLAME_EXTENDING_DURATION = 0.5
 FLAME_HOLDING_DURATION = 1.0
 FLAME_RECEDING_DURATION = 0.4
 FLAME_IGNITION_VOLUME = 0.6
+# Where the bird is expected to be when crossing a flame thrower — has to
+# cruise above the fully-extended flame top (~y=544 with current tuning).
+FLAME_THROWER_BIRD_CRUISE_Y = 600
 
 # Spawn distribution. Column-pair takes whatever weight is left after the
 # others — keeps the table summing to 1.0 even when individual chances change.
@@ -1147,6 +1150,10 @@ class GameView(arcade.View):
         # When a wolf spawns, it stashes its y here so the *next* column's
         # gap_center is clamped near that altitude (reachable in one transition).
         self.next_gap_center_bias: float | None = None
+        # Bird's expected altitude as it crosses each obstacle — tracked so the
+        # NEXT coin cluster's y can be biased onto the bird's path, and so each
+        # wolf spawn can be clamped to within reach of the previous obstacle.
+        self.bird_expected_y = WINDOW_HEIGHT // 2
 
         self.player_sprite.change_y = 0
         self.moving_horizontally = False
@@ -1521,8 +1528,13 @@ class GameView(arcade.View):
         # Branches stay flat instead of accumulating cumulative thresholds.
         kind = OBSTACLE_SPAWN_TABLE.pick(random.random())
         if kind == "wolf":
-            # Rare rescue opportunity — wolf in a bubble at an off-center altitude.
-            self.spawn_wolf(column_x)
+            # Rare rescue opportunity. Clamp the wolf so it's reachable from
+            # the previous obstacle's exit altitude (mirrors the wolf -> next
+            # column clamp that already lives in the column branch).
+            wolf_y = self.spawn_wolf(
+                column_x, reachable_from_y=self.bird_expected_y,
+            )
+            self.bird_expected_y = wolf_y
         elif kind == "spiky":
             # Rotating spiky ball: deadly on contact, scores by clearing.
             ball = self.make_spiky_ball(column_x)
@@ -1538,13 +1550,19 @@ class GameView(arcade.View):
             self.scene.add_sprite("ScoreZones", score_zone)
             # Make the next column reachable from the ball's orbit center.
             self.next_gap_center_bias = ball.motion.base_y
+            self.bird_expected_y = ball.motion.base_y
         elif kind == "ring":
             # Bonus ring spawn (non-fatal pickup).
-            self.scene.add_sprite("Rings", self.make_ring(column_x))
+            ring = self.make_ring(column_x)
+            self.scene.add_sprite("Rings", ring)
+            # Player flies AT the ring to collect it — that's the next altitude.
+            self.bird_expected_y = ring.motion.base_y
         elif kind == "flame_thrower":
             # Floor-mounted flame thrower with a predictable extend/hold/recede
             # cycle. Owns its lane — no column pair at the same x.
             self.spawn_flame_thrower(column_x)
+            # Player has to cruise above the flame's reach.
+            self.bird_expected_y = FLAME_THROWER_BIRD_CRUISE_Y
         elif kind == "boulder":
             # Spawn a single oscillating boulder instead of a column pair. Constrain
             # its lowest swing so the bonus ring at the floor stays reachable.
@@ -1595,6 +1613,7 @@ class GameView(arcade.View):
                 if gap_y_min > gap_y_max:
                     gap_y_min = gap_y_max = (gap_y_min + gap_y_max) // 2
             gap_center = random.randint(gap_y_min, gap_y_max)
+            self.bird_expected_y = gap_center
             if oscillating:
                 amplitude = random.randint(PIPE_AMPLITUDE_MIN, PIPE_AMPLITUDE_MAX)
                 phase = random.uniform(0, 2 * math.pi)
@@ -1643,8 +1662,11 @@ class GameView(arcade.View):
 
         # Drop a coin cluster halfway between this obstacle and the next one
         # (both will be moving leftward in lock-step, so relative spacing is preserved).
+        # Bias the y onto the bird's current flight path so the coins land
+        # along the route the bird is actually flying, not random screen-y.
         coin_cluster_x = column_x + self.next_pipe_spacing // 2
-        coin_cluster_y = random.randint(COIN_Y_MIN, COIN_Y_MAX)
+        coin_cluster_y = int(self.bird_expected_y) + random.randint(-30, 30)
+        coin_cluster_y = max(COIN_Y_MIN, min(COIN_Y_MAX, coin_cluster_y))
         self.spawn_coin_cluster(coin_cluster_x, coin_cluster_y)
 
 
@@ -2033,14 +2055,24 @@ class GameView(arcade.View):
             coin.center_y = center_y
             self.scene.add_sprite("Coins", coin)
 
-    def spawn_wolf(self, x):
-        """ Spawn a caged-in-a-bubble wolf at the right edge, biased to upper
-        or lower band so reaching it requires altitude commitment. Also stashes
-        the y so the next column gap is constrained to be reachable. """
-        if random.random() < 0.5:
-            y = random.randint(WOLF_Y_LOW_MIN, WOLF_Y_LOW_MAX)
+    def spawn_wolf(self, x, reachable_from_y=None):
+        """ Spawn a caged-in-a-bubble wolf at the right edge. ``reachable_from_y``
+        (the bird's previous-obstacle exit altitude) clamps the wolf's y to
+        within ``WOLF_REACHABLE_DELTA_Y`` of that altitude so the player can
+        actually descend/climb to it before the wolf scrolls off-screen.
+        Also stashes the y so the next column's gap is reachable from the wolf.
+        Returns the chosen y. """
+        if reachable_from_y is None:
+            # Original behavior: bias to upper or lower band.
+            if random.random() < 0.5:
+                y = random.randint(WOLF_Y_LOW_MIN, WOLF_Y_LOW_MAX)
+            else:
+                y = random.randint(WOLF_Y_HIGH_MIN, WOLF_Y_HIGH_MAX)
         else:
-            y = random.randint(WOLF_Y_HIGH_MIN, WOLF_Y_HIGH_MAX)
+            prev = int(reachable_from_y)
+            y_min = max(WOLF_Y_LOW_MIN, prev - WOLF_REACHABLE_DELTA_Y)
+            y_max = min(WOLF_Y_HIGH_MAX, prev + WOLF_REACHABLE_DELTA_Y)
+            y = random.randint(y_min, y_max) if y_min <= y_max else prev
         wolf = arcade.Sprite(self.wolf_standing_texture, scale=WOLF_SCALE)
         wolf.center_x = x
         wolf.center_y = y
@@ -2050,6 +2082,7 @@ class GameView(arcade.View):
         wolf.freed_timer = 0.0
         self.wolves.append(wolf)
         self.next_gap_center_bias = y
+        return y
 
     def update_wolves(self, delta_time):
         for wolf in self.wolves[:]:

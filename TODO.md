@@ -24,13 +24,9 @@ is committed to any timeline.
       invincibility-during-dash like Hollow Knight.
 
 ### New obstacles
-- [ ] **Flame jet / flame thrower** — wall-mounted torch (or similar) that
-      cycles ON / OFF on a timer. Flames are lethal during ON, dormant
-      during OFF — player times their passage. Assets already in
-      `assets/flame*.png` (21 frames). State machine is straightforward;
-      use the existing `Motion` strategy + a separate `EmitterTiming`
-      attribute, or just a timer per emitter. Could spawn in pairs
-      (top + bottom of screen) for a "shoot through the gap" puzzle.
+- [ ] **Ceiling flame thrower / paired throwers** — mirror of the floor
+      flame thrower hanging from the top, alternating phase with a
+      floor instance to make a "shoot through the gap" puzzle.
 - [ ] **Other motion patterns** — figure-8, pendulum, vertical bouncing
       ball. With the `Motion` strategy in place each new pattern is one
       subclass and a make_X helper.
@@ -53,8 +49,13 @@ is committed to any timeline.
       that takes multiple hits / requires a specific path.
 
 ### Combo / scoring extensions
-- [ ] Combo bonus that spans rings *and* coins, not just rings.
+- [ ] Unified pickup combo that spans rings *and* coins on one shared
+      streak counter (coin streak and ring combo are independent today).
 - [ ] "Perfect run" bonus for clearing a stretch with no near-misses.
+- [ ] **Late-game difficulty escalation past score 200** — once the
+      gap/spacing curve plateaus, layer in `PIPE_SPEED` increase,
+      shorter flame-thrower dormant windows, or a higher flame-thrower
+      spawn weight so the game keeps getting harder for top players.
 
 ## Atmosphere / polish
 
@@ -112,19 +113,27 @@ trajectory, not just what's missing.
 - Boulders (sine bob), spiky balls (circular orbit), rings (combo + pitch
   ramp + particle burst + floating text), coins (clusters), wolves
   (rescue in a bubble for +50 + howl), bonus rings under boulders
+- Floor-mounted flame thrower with dormant -> warning wisp -> extending
+  -> holding -> receding cycle; segments stack with overlap; randomized
+  per-instance phase; ignition sound
 - Weather: rain visuals, optional rain audio, thunderstorm cycle with
   lightning flash + delayed thunder + wind gust corridors
+- Atmospheric cloud parallax: each cloud's depth drives scale, drift
+  speed, tint, and z-order
 - Player profiles + score history + leaderboard (`ScoreStore`)
 - Gamepad support (per-view button handlers + analog stick deadzone)
 - Title / profile picker / high-score / game-over screens with cards
 - Difficulty curve interpolating from easier-than-base at score 0 to a
-  tight peak at score 30
+  tight peak at score 200 (gap and obstacle-spacing factors lerp together)
 - State pattern for the player (Normal / Shielded / Invincible / Dashing)
 - Strategy pattern for motion (Linear / Sine / Circular)
 - Event bus for scoring side-effects (sound, particles, floating text,
   milestone celebration, game over) — scoring sites emit typed events,
   subscribers attach independently
+- Escalating coin-streak bonus: every 10 coins in a row pays a doubling
+  bonus capped at +80, with a gold banner stamp and pitched fanfare;
+  one missed coin breaks the streak
 - Pure-Python extracted modules: `score_store`, `motion`,
   `player_state`, `difficulty`, `scoring`, `spawn_table`, `geometry`,
-  `weather_state`, `animation`, `assets`
-- ~120 unit tests covering the testable logic
+  `weather_state`, `animation`, `assets`, `events`, `flame_thrower`
+- ~165 unit tests covering the testable logic
