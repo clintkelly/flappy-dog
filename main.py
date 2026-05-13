@@ -11,9 +11,22 @@ import arcade
 import pyglet
 import random
 
+import difficulty
+import geometry
+import scoring
 from motion import CircularMotion
 from player_state import NormalState, PlayerState
 from score_store import DEFAULT_PROFILE, ScoreStore
+from spawn_table import SpawnTable
+from weather_state import (
+    FlashLightning,
+    PlayThunder,
+    SpawnGust,
+    StartRain,
+    StopRain,
+    StormStart,
+    WeatherStateMachine,
+)
 
 # Constants
 WINDOW_WIDTH = 1280
@@ -233,6 +246,23 @@ SPIKY_BALL_BASE_Y_MIN = 250           # orbit-center y range (middle band)
 SPIKY_BALL_BASE_Y_MAX = WINDOW_HEIGHT - 250
 SPIKY_BALL_SPIN_DEGREES_PER_FRAME = 5  # purely visual sprite rotation
 
+# Spawn distribution. Column-pair takes whatever weight is left after the
+# others — keeps the table summing to 1.0 even when individual chances change.
+_COLUMN_PAIR_SPAWN_WEIGHT = (
+    1.0
+    - WOLF_SPAWN_CHANCE
+    - SPIKY_BALL_SPAWN_CHANCE
+    - RING_OBSTACLE_CHANCE
+    - BOULDER_OBSTACLE_CHANCE
+)
+OBSTACLE_SPAWN_TABLE = SpawnTable([
+    ("wolf", WOLF_SPAWN_CHANCE),
+    ("spiky", SPIKY_BALL_SPAWN_CHANCE),
+    ("ring", RING_OBSTACLE_CHANCE),
+    ("boulder", BOULDER_OBSTACLE_CHANCE),
+    ("column", _COLUMN_PAIR_SPAWN_WEIGHT),
+])
+
 # Weather. RainSystem is a self-contained falling-rain effect; WeatherController
 # composes it with a thunderstorm state machine (clear → storm-onset → storm → clear)
 # and a flash overlay for lightning.
@@ -246,24 +276,11 @@ RAIN_COLOR = (240, 250, 255, 230)  # RGBA — near-white, mostly opaque against 
 RAIN_THICKNESS = 2
 RAIN_SOUND_VOLUME = 0.5
 
-# Weather cycle timings (seconds). Tuned so a typical 30-90 second run sees at
-# least one full storm cycle.
-STORM_INTERVAL_MIN = 5.0            # delay before first storm + between storms
-STORM_INTERVAL_MAX = 18.0
-STORM_DURATION_MIN = 30.0
-STORM_DURATION_MAX = 60.0
-STORM_ONSET_FLASH_DELAY = 0.6       # flash → thunder
-STORM_ONSET_RAIN_DELAY = 1.4        # thunder → rain begins
-
-# Lightning + thunder
+# Weather *visual* + *audio* tuning. The storm-cycle TIMING constants
+# (STORM_INTERVAL_*, STORM_DURATION_*, LIGHTNING_INTERVAL_*, etc.) live in
+# weather_state.py because they're behavioral and unit-tested there.
 LIGHTNING_FLASH_ALPHA = 230
 LIGHTNING_FLASH_DURATION = 0.25     # seconds for full-screen flash to fade to 0
-LIGHTNING_INTERVAL_MIN = 4.0        # seconds between lightning events during a storm
-LIGHTNING_INTERVAL_MAX = 9.0
-LIGHTNING_FIRST_DELAY_MIN = 2.0     # delay before the first in-storm lightning
-LIGHTNING_FIRST_DELAY_MAX = 4.5
-THUNDER_DELAY_MIN = 0.4             # delay between flash and the thunder clap
-THUNDER_DELAY_MAX = 1.1
 THUNDER_VOLUME = 0.8
 
 # Wind gust corridors — visible vertical columns of falling air that spawn
@@ -275,8 +292,6 @@ GUST_WIDTH_MAX = 300
 GUST_HEIGHT_MIN = 320
 GUST_HEIGHT_MAX = 500
 GUST_Y_MARGIN = 60                  # don't spawn flush against the top or bottom
-GUST_SPAWN_INTERVAL_MIN = 5.0
-GUST_SPAWN_INTERVAL_MAX = 11.0
 GUST_DOWNDRAFT = 0.35               # added to change_y per frame inside a gust (gravity is 0.6)
 GUST_LINE_COUNT = 8                 # horizontal stripes visible inside the column
 GUST_LINE_COLOR = (255, 255, 255, 235)
@@ -408,46 +423,30 @@ class WindGust:
 
 
 class WeatherController:
-    """ State machine cycling clear ↔ storm with lightning + thunder events.
+    """ Arcade-side facade over the pure-Python ``WeatherStateMachine``.
 
-    States:
-        CLEAR      no rain, no flashes; waiting for the next storm to roll in
-        ONSET      lightning flash → thunder → rain starts (transition into storm)
-        STORM      rain falling + periodic lightning/thunder pairs + wind gusts
+    Owns the rain system, the active wind gusts, the flash overlay state,
+    and the audio players. Each frame: ticks the state machine, then acts
+    on whatever events it emits (play thunder, flash, start/stop rain,
+    reset rain on storm start, spawn gust). All transition logic and
+    timer math lives in weather_state.py for testability.
     """
-
-    CLEAR = "clear"
-    ONSET = "onset"
-    STORM = "storm"
 
     def __init__(self, rain_sound=None, thunder_sound=None):
         self.rain = RainSystem()
         self.rain_sound = rain_sound
         self.thunder_sound = thunder_sound
         self.rain_player = None
-
-        self.state = self.CLEAR
-        self.time_until_next_storm = random.uniform(STORM_INTERVAL_MIN, STORM_INTERVAL_MAX)
-        self.storm_time_left = 0.0
-
-        # ONSET sub-stage timers: 0=flash phase, 1=post-thunder wait, 2=transition to STORM.
-        self.onset_stage = 0
-        self.onset_timer = 0.0
-
-        # During STORM, time until next lightning event.
-        self.time_until_lightning = 0.0
-        # Delayed thunder fires this many seconds after its flash.
-        self.pending_thunder_in = None
-
-        # Wind gusts (corridors that downdraft the bird while overlapping).
+        self.state_machine = WeatherStateMachine()
         self.gusts: list[WindGust] = []
-        self.time_until_next_gust = float("inf")  # no gusts until a storm is active
-
-        # Flash overlay state.
+        # Flash overlay state — only the visual decay is owned here; the
+        # state machine just tells us when to fire a new flash.
         self.flash_alpha = 0.0
         self.flash_decay_per_second = LIGHTNING_FLASH_ALPHA / LIGHTNING_FLASH_DURATION
 
-    # ----- lifecycle -----
+    @property
+    def state(self):
+        return self.state_machine.state
 
     def shutdown(self):
         """ Stop the rain loop. Call from on_hide_view. """
@@ -460,14 +459,6 @@ class WeatherController:
         if self.flash_alpha > 0:
             self.flash_alpha = max(0.0, self.flash_alpha - self.flash_decay_per_second * delta_time)
 
-        # Delayed thunder fires regardless of state — it was scheduled at flash time.
-        if self.pending_thunder_in is not None:
-            self.pending_thunder_in -= delta_time
-            if self.pending_thunder_in <= 0:
-                if self.thunder_sound:
-                    arcade.play_sound(self.thunder_sound, volume=THUNDER_VOLUME)
-                self.pending_thunder_in = None
-
         # Active gusts continue to scroll and cull regardless of weather state,
         # so a gust spawned at the end of a storm still finishes its travel.
         for gust in self.gusts[:]:
@@ -475,28 +466,16 @@ class WeatherController:
             if gust.is_off_screen():
                 self.gusts.remove(gust)
 
-        if self.state == self.CLEAR:
-            self.time_until_next_storm -= delta_time
-            if self.time_until_next_storm <= 0:
-                self._begin_onset()
-        elif self.state == self.ONSET:
-            self._update_onset(delta_time)
-        elif self.state == self.STORM:
+        # Tick the state machine and act on emitted events.
+        for event in self.state_machine.update(delta_time):
+            self._handle_event(event)
+
+        # Rain only updates visually while the storm is actually raining.
+        if self.state == WeatherStateMachine.STORM:
             self.rain.update(delta_time)
-            self.storm_time_left -= delta_time
-            self.time_until_lightning -= delta_time
-            if self.time_until_lightning <= 0:
-                self._trigger_lightning()
-            self.time_until_next_gust -= delta_time
-            if self.time_until_next_gust <= 0:
-                self._spawn_gust()
-            if self.storm_time_left <= 0:
-                self._end_storm()
 
     def draw(self):
-        # Rain is only visible once the storm is fully underway — during ONSET
-        # we're still in the flash/thunder pre-roll and rain hasn't begun yet.
-        if self.state == self.STORM:
+        if self.state == WeatherStateMachine.STORM:
             self.rain.draw()
         for gust in self.gusts:
             gust.draw()
@@ -514,41 +493,28 @@ class WeatherController:
                 fy -= GUST_DOWNDRAFT
         return fx, fy
 
-    # ----- transitions -----
+    # ----- event handlers -----
 
-    def _begin_onset(self):
-        self.state = self.ONSET
-        self.onset_stage = 0
-        self.onset_timer = 0.0
-        self.rain.reset_above_screen()
-        self._flash()
-        # Schedule thunder some time after the flash.
-        self.pending_thunder_in = STORM_ONSET_FLASH_DELAY
-
-    def _update_onset(self, delta_time):
-        self.onset_timer += delta_time
-        if self.onset_stage == 0 and self.onset_timer >= STORM_ONSET_FLASH_DELAY:
-            self.onset_stage = 1
-            self.onset_timer = 0.0
-        elif self.onset_stage == 1 and self.onset_timer >= STORM_ONSET_RAIN_DELAY:
-            # Transition into the steady storm — start rain sound and visuals.
-            self.onset_stage = 2
-            self.state = self.STORM
-            self.storm_time_left = random.uniform(STORM_DURATION_MIN, STORM_DURATION_MAX)
-            # The *first* in-storm lightning fires sooner so the player sees the
-            # periodic cadence right away rather than waiting for the long
-            # randomized interval.
-            self.time_until_lightning = random.uniform(LIGHTNING_FIRST_DELAY_MIN, LIGHTNING_FIRST_DELAY_MAX)
-            self.time_until_next_gust = random.uniform(GUST_SPAWN_INTERVAL_MIN, GUST_SPAWN_INTERVAL_MAX)
-            self._start_rain_loop()
-
-    def _end_storm(self):
-        self.state = self.CLEAR
-        self.time_until_next_storm = random.uniform(STORM_INTERVAL_MIN, STORM_INTERVAL_MAX)
-        self.time_until_next_gust = float("inf")  # stop spawning new gusts
-        if self.rain_player is not None:
-            arcade.stop_sound(self.rain_player)
-            self.rain_player = None
+    def _handle_event(self, event):
+        if isinstance(event, FlashLightning):
+            self.flash_alpha = float(LIGHTNING_FLASH_ALPHA)
+        elif isinstance(event, PlayThunder):
+            if self.thunder_sound is not None:
+                arcade.play_sound(self.thunder_sound, volume=THUNDER_VOLUME)
+        elif isinstance(event, StartRain):
+            if self.rain_sound is not None and self.rain_player is None:
+                self.rain_player = arcade.play_sound(
+                    self.rain_sound, volume=RAIN_SOUND_VOLUME, loop=True,
+                )
+        elif isinstance(event, StopRain):
+            if self.rain_player is not None:
+                arcade.stop_sound(self.rain_player)
+                self.rain_player = None
+        elif isinstance(event, StormStart):
+            # Push all drops above/right so the storm visibly rolls in.
+            self.rain.reset_above_screen()
+        elif isinstance(event, SpawnGust):
+            self._spawn_gust()
 
     def _spawn_gust(self):
         width = random.randint(GUST_WIDTH_MIN, GUST_WIDTH_MAX)
@@ -556,22 +522,6 @@ class WeatherController:
         bottom = random.randint(GUST_Y_MARGIN, WINDOW_HEIGHT - GUST_Y_MARGIN - height)
         # Spawn just off the right edge so it scrolls into view.
         self.gusts.append(WindGust(WINDOW_WIDTH, bottom, width, height))
-        self.time_until_next_gust = random.uniform(GUST_SPAWN_INTERVAL_MIN, GUST_SPAWN_INTERVAL_MAX)
-
-    def _trigger_lightning(self):
-        self._flash()
-        if self.thunder_sound:
-            self.pending_thunder_in = random.uniform(THUNDER_DELAY_MIN, THUNDER_DELAY_MAX)
-        self.time_until_lightning = random.uniform(LIGHTNING_INTERVAL_MIN, LIGHTNING_INTERVAL_MAX)
-
-    def _flash(self):
-        self.flash_alpha = float(LIGHTNING_FLASH_ALPHA)
-
-    def _start_rain_loop(self):
-        if self.rain_sound is not None and self.rain_player is None:
-            self.rain_player = arcade.play_sound(
-                self.rain_sound, volume=RAIN_SOUND_VOLUME, loop=True,
-            )
 
 
 class TitleView(arcade.View):
@@ -1390,10 +1340,10 @@ class GameView(arcade.View):
         for ring in ring_hits:
             self.spawn_burst(ring.center_x, ring.center_y)
             self.ring_combo += 1
-            bonus = RING_POINTS + (self.ring_combo - 1) * RING_COMBO_BONUS_STEP
+            bonus = scoring.combo_bonus(self.ring_combo, RING_POINTS, RING_COMBO_BONUS_STEP)
             self._award_score(bonus)
             self.spawn_floating_text(ring.center_x, ring.center_y, f"+{bonus}")
-            pitch = min(1.0 + (self.ring_combo - 1) * RING_PITCH_STEP, RING_PITCH_MAX)
+            pitch = scoring.combo_pitch(self.ring_combo, RING_PITCH_STEP, RING_PITCH_MAX)
             arcade.play_sound(self.ring_sound, speed=pitch)
             ring.remove_from_sprite_lists()
 
@@ -1465,57 +1415,43 @@ class GameView(arcade.View):
         """ Column hanging from the ceiling. Cap sits flush above the gap; mid tiles stack upward.
         extend_for_oscillation pads the column past the screen edge so it still covers when the
         gap slides downward. """
-        tiles = []
-
-        cap = arcade.Sprite(
-            random.choice(self.column_ceiling_cap_textures),
-            scale=COLUMN_TILE_SCALE,
+        centers = geometry.top_column_tile_centers(
+            gap_top=gap_top,
+            tile_size=COLUMN_TILE_RENDERED,
+            overlap=COLUMN_TILE_VERTICAL_OVERLAP,
+            target_top=WINDOW_HEIGHT + extend_for_oscillation,
         )
-        cap.center_x = center_x
-        cap.center_y = gap_top + COLUMN_TILE_RENDERED // 2
-        tiles.append(cap)
-
-        # Stack mid tiles above the cap until the column extends past the top of the screen.
-        # Each tile overlaps the one below by COLUMN_TILE_VERTICAL_OVERLAP to hide art seams.
-        target_top = WINDOW_HEIGHT + extend_for_oscillation
-        next_bottom = cap.top - COLUMN_TILE_VERTICAL_OVERLAP
-        while next_bottom < target_top:
-            mid = arcade.Sprite(
-                random.choice(self.column_mid_textures),
-                scale=COLUMN_TILE_SCALE,
-            )
-            mid.center_x = center_x
-            mid.center_y = next_bottom + COLUMN_TILE_RENDERED // 2
-            tiles.append(mid)
-            next_bottom = mid.top - COLUMN_TILE_VERTICAL_OVERLAP
-
+        tiles = []
+        for i, center_y in enumerate(centers):
+            if i == 0:
+                texture = random.choice(self.column_ceiling_cap_textures)
+            else:
+                texture = random.choice(self.column_mid_textures)
+            tile = arcade.Sprite(texture, scale=COLUMN_TILE_SCALE)
+            tile.center_x = center_x
+            tile.center_y = center_y
+            tiles.append(tile)
         return tiles
 
     def make_bottom_column(self, center_x, gap_bottom, extend_for_oscillation=0):
         """ Column rising from the floor. Cap sits flush below the gap; mid tiles stack downward.
         extend_for_oscillation pads past the bottom of the screen for oscillating gaps. """
-        tiles = []
-
-        cap = arcade.Sprite(
-            random.choice(self.column_floor_cap_textures),
-            scale=COLUMN_TILE_SCALE,
+        centers = geometry.bottom_column_tile_centers(
+            gap_bottom=gap_bottom,
+            tile_size=COLUMN_TILE_RENDERED,
+            overlap=COLUMN_TILE_VERTICAL_OVERLAP,
+            target_bottom=-extend_for_oscillation,
         )
-        cap.center_x = center_x
-        cap.center_y = gap_bottom - COLUMN_TILE_RENDERED // 2
-        tiles.append(cap)
-
-        target_bottom = -extend_for_oscillation
-        next_top = cap.bottom + COLUMN_TILE_VERTICAL_OVERLAP
-        while next_top > target_bottom:
-            mid = arcade.Sprite(
-                random.choice(self.column_mid_textures),
-                scale=COLUMN_TILE_SCALE,
-            )
-            mid.center_x = center_x
-            mid.center_y = next_top - COLUMN_TILE_RENDERED // 2
-            tiles.append(mid)
-            next_top = mid.bottom + COLUMN_TILE_VERTICAL_OVERLAP
-
+        tiles = []
+        for i, center_y in enumerate(centers):
+            if i == 0:
+                texture = random.choice(self.column_floor_cap_textures)
+            else:
+                texture = random.choice(self.column_mid_textures)
+            tile = arcade.Sprite(texture, scale=COLUMN_TILE_SCALE)
+            tile.center_x = center_x
+            tile.center_y = center_y
+            tiles.append(tile)
         return tiles
 
     def make_middle_pipe(self, center_x, gap_center, gap_size):
@@ -1541,20 +1477,24 @@ class GameView(arcade.View):
         gap_bias = self.next_gap_center_bias
         self.next_gap_center_bias = None
 
-        # Difficulty factor: 0 at score 0, 1 once score >= DIFFICULTY_RAMP_SCORE.
-        # Each factor interpolates from its easier START value down to MAX_DIFFICULTY.
-        t = min(self.score / DIFFICULTY_RAMP_SCORE, 1.0) if DIFFICULTY_RAMP_SCORE > 0 else 1.0
-        spacing_factor = lerp(SPACING_RATIO_AT_START, SPACING_RATIO_AT_MAX_DIFFICULTY, t)
+        # Difficulty curves live in difficulty.py — pure functions that
+        # interpolate from the *_AT_START values to *_AT_MAX_DIFFICULTY values
+        # as the score climbs to DIFFICULTY_RAMP_SCORE.
+        spacing_factor = difficulty.spacing_factor(
+            self.score, DIFFICULTY_RAMP_SCORE,
+            SPACING_RATIO_AT_START, SPACING_RATIO_AT_MAX_DIFFICULTY,
+        )
 
         # Spawn just off the right edge of the screen
         column_x = WINDOW_WIDTH + COLUMN_TILE_RENDERED // 2
 
-        # Single roll picks wolf / spiky / ring / boulder / column-pair so probabilities don't compound.
-        roll = random.random()
-        if roll < WOLF_SPAWN_CHANCE:
+        # Single weighted roll picks wolf / spiky / ring / boulder / column-pair.
+        # Branches stay flat instead of accumulating cumulative thresholds.
+        kind = OBSTACLE_SPAWN_TABLE.pick(random.random())
+        if kind == "wolf":
             # Rare rescue opportunity — wolf in a bubble at an off-center altitude.
             self.spawn_wolf(column_x)
-        elif roll < WOLF_SPAWN_CHANCE + SPIKY_BALL_SPAWN_CHANCE:
+        elif kind == "spiky":
             # Rotating spiky ball: deadly on contact, scores by clearing.
             ball = self.make_spiky_ball(column_x)
             self.scene.add_sprite("OrbitObstacles", ball)
@@ -1568,10 +1508,10 @@ class GameView(arcade.View):
             self.scene.add_sprite("ScoreZones", score_zone)
             # Make the next column reachable from the ball's orbit center.
             self.next_gap_center_bias = ball.motion.base_y
-        elif roll < WOLF_SPAWN_CHANCE + SPIKY_BALL_SPAWN_CHANCE + RING_OBSTACLE_CHANCE:
+        elif kind == "ring":
             # Bonus ring spawn (non-fatal pickup).
             self.scene.add_sprite("Rings", self.make_ring(column_x))
-        elif roll < WOLF_SPAWN_CHANCE + SPIKY_BALL_SPAWN_CHANCE + RING_OBSTACLE_CHANCE + BOULDER_OBSTACLE_CHANCE:
+        elif kind == "boulder":
             # Spawn a single oscillating boulder instead of a column pair. Constrain
             # its lowest swing so the bonus ring at the floor stays reachable.
             self.scene.add_sprite(
@@ -1592,12 +1532,15 @@ class GameView(arcade.View):
             # Risk-reward: a static bonus ring near the floor, tempting the player to
             # fly *under* the boulder instead of over it.
             self.scene.add_sprite("Rings", self.make_bonus_ring(column_x))
-        else:
+        else:  # kind == "column"
             # Column pair (static or oscillating). Difficulty scaling applies in both cases.
-            gap_factor = lerp(GAP_RATIO_AT_START, GAP_RATIO_AT_MAX_DIFFICULTY, t)
+            gap_factor_value = difficulty.gap_factor(
+                self.score, DIFFICULTY_RAMP_SCORE,
+                GAP_RATIO_AT_START, GAP_RATIO_AT_MAX_DIFFICULTY,
+            )
             gap_size = random.randint(
-                int(MIN_PIPE_CENTER_GAP * gap_factor),
-                int(MAX_PIPE_CENTER_GAP * gap_factor),
+                int(MIN_PIPE_CENTER_GAP * gap_factor_value),
+                int(MAX_PIPE_CENTER_GAP * gap_factor_value),
             )
 
             oscillating = random.random() < OSCILLATING_PIPE_CHANCE
@@ -1834,8 +1777,8 @@ class GameView(arcade.View):
         old = self.score
         self.score += points
         self.score_text.text = f"Score: {self.score}"
-        if self.score // MILESTONE_THRESHOLD > old // MILESTONE_THRESHOLD:
-            milestone = (self.score // MILESTONE_THRESHOLD) * MILESTONE_THRESHOLD
+        milestone = scoring.crossed_milestone(old, self.score, MILESTONE_THRESHOLD)
+        if milestone is not None:
             self.spawn_milestone_text(milestone)
             arcade.play_sound(self.milestone_sound, volume=MILESTONE_VOLUME)
 
