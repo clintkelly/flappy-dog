@@ -316,7 +316,11 @@ FLAME_WARMING_DURATION = 0.3
 FLAME_EXTENDING_DURATION = 0.5
 FLAME_HOLDING_DURATION = 1.0
 FLAME_RECEDING_DURATION = 0.4
-FLAME_IGNITION_VOLUME = 0.6
+FLAME_IGNITION_VOLUME = 1.0
+# How many times the ignition sound is layered on each whoosh. macOS CoreAudio
+# caps per-play volume at 1.0, so to get above that we just play the sound
+# multiple times in the same frame (each layer adds ~6 dB of amplitude).
+FLAME_IGNITION_STACK = 2
 # Where the bird is expected to be when crossing a flame thrower — has to
 # cruise above the fully-extended flame top (~y=544 with current tuning).
 FLAME_THROWER_BIRD_CRUISE_Y = 600
@@ -1782,7 +1786,8 @@ class GameView(arcade.View):
     def move_orbit_obstacles(self, delta_time):
         """ Advance each orbit obstacle via its Motion strategy, spin the
         sprite visually, emit a trail particle on a fixed interval, and cull
-        when the orbit center is fully past the left edge. """
+        the first frame the sprite is fully past the left edge — no second
+        passes back on-screen as the orbit phase swings back to the right. """
         for obstacle in self.scene.get_sprite_list("OrbitObstacles"):
             obstacle.motion.update(obstacle, delta_time)
             obstacle.angle += SPIKY_BALL_SPIN_DEGREES_PER_FRAME
@@ -1795,7 +1800,7 @@ class GameView(arcade.View):
                     SPIKY_BALL_TRAIL_RADIUS_MIN, SPIKY_BALL_TRAIL_RADIUS_MAX,
                     SPIKY_BALL_TRAIL_LIFETIME,
                 )
-            if obstacle.motion.base_x + obstacle.motion.radius < 0:
+            if obstacle.right < 0:
                 obstacle.remove_from_sprite_lists()
 
     def spawn_flame_thrower(self, x):
@@ -1850,9 +1855,10 @@ class GameView(arcade.View):
             previous_state = base.cycle.state
             base.cycle.update(delta_time)
             if base.cycle.just_ignited(previous_state) and self.flame_ignition_sound:
-                arcade.play_sound(
-                    self.flame_ignition_sound, volume=FLAME_IGNITION_VOLUME,
-                )
+                for _ in range(FLAME_IGNITION_STACK):
+                    arcade.play_sound(
+                        self.flame_ignition_sound, volume=FLAME_IGNITION_VOLUME,
+                    )
 
             # Reconcile segments against the cycle's current count.
             desired = base.cycle.segment_count
