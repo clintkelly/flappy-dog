@@ -24,6 +24,21 @@ is committed to any timeline.
       invincibility-during-dash like Hollow Knight.
 
 ### New obstacles
+- [ ] **Horizontally traveling dragons** — large enemy sprite that
+      enters from the right and crosses the screen at a steady (or
+      slightly weaving) altitude faster than the world scroll. Lethal
+      on contact. Visual: animated wing-flap frames. Open design
+      questions: dragon altitude bias (clamp to bird's current y for
+      threat, or random for variety), should it telegraph its entry
+      with a "roar" sound a beat before appearing, can it be defeated
+      with the future bird-fired projectile?
+- [ ] **Ceiling lightning bolts** — reverse flame thrower hanging from
+      the top. Same predictable cycle (dormant → warning glow → strike
+      extending downward → hold → recede) but the "flame" segments are
+      jagged white/blue bolts. Reuse the `FlameThrowerCycle` state
+      machine wholesale; just flip the segment positioning to extend
+      downward from a ceiling-mounted emitter. Pairs naturally with the
+      existing floor flame thrower for vertical hazard variety.
 - [ ] **Ceiling flame thrower / paired throwers** — mirror of the floor
       flame thrower hanging from the top, alternating phase with a
       floor instance to make a "shoot through the gap" puzzle.
@@ -52,17 +67,13 @@ is committed to any timeline.
 - [ ] Unified pickup combo that spans rings *and* coins on one shared
       streak counter (coin streak and ring combo are independent today).
 - [ ] "Perfect run" bonus for clearing a stretch with no near-misses.
-- [ ] **Late-game difficulty escalation past score 200** — once the
+- [ ] **Late-game difficulty escalation past score 400** — once the
       gap/spacing curve plateaus, layer in `PIPE_SPEED` increase,
       shorter flame-thrower dormant windows, or a higher flame-thrower
       spawn weight so the game keeps getting harder for top players.
 
 ## Atmosphere / polish
 
-- [ ] **Rainbow after rain** — when a storm ends (`StopRain` event),
-      briefly draw a rainbow arc across the sky for ~10 s, fading in
-      and out. Pure code (`arcade.draw_arc_outline` or similar) or a
-      single asset.
 - [ ] **Day / night cycle** — sky tint shifts from blue → orange (sunset)
       → indigo (night with stars) → back. Mountains darken at night.
       No gameplay impact; pure atmosphere.
@@ -70,7 +81,6 @@ is committed to any timeline.
       during thunder. Different tracks per level if we add levels.
 - [ ] **Bird customization** — pick from a few bird skins on the profile
       picker. Asset work: 2-3 alternate bird sprite sets.
-- [ ] **Particle "feathers"** when the bird flaps hard.
 - [ ] **Cinematic death** — slow-mo for the last 200 ms before game over
       (the world freezes, the bird falls dramatically, then the panel
       appears).
@@ -117,14 +127,21 @@ trajectory, not just what's missing.
   -> holding -> receding cycle; segments stack with overlap; randomized
   per-instance phase; ignition sound
 - Weather: rain visuals, optional rain audio, thunderstorm cycle with
-  lightning flash + delayed thunder + wind gust corridors
+  lightning flash + delayed thunder + wind gust corridors, slate-blue
+  dim overlay that ramps in/out with storm state, post-storm rainbow
+  that paints in left-to-right and fades out
 - Atmospheric cloud parallax: each cloud's depth drives scale, drift
   speed, tint, and z-order
+- Particle trails on spiky balls (red/orange comet) and freed wolves
+  (gold sparkle plume); pale flap-puff particles from the bird's tail
+- Coin clusters and wolves placed onto the bird's expected flight path
+  (gap center / previous obstacle's exit y), not at random altitudes
 - Player profiles + score history + leaderboard (`ScoreStore`)
+- HUD: profile name + score in 34pt bold gold, top-left of screen
 - Gamepad support (per-view button handlers + analog stick deadzone)
 - Title / profile picker / high-score / game-over screens with cards
 - Difficulty curve interpolating from easier-than-base at score 0 to a
-  tight peak at score 200 (gap and obstacle-spacing factors lerp together)
+  tight peak at score 400 (gap and obstacle-spacing factors lerp together)
 - State pattern for the player (Normal / Shielded / Invincible / Dashing)
 - Strategy pattern for motion (Linear / Sine / Circular)
 - Event bus for scoring side-effects (sound, particles, floating text,

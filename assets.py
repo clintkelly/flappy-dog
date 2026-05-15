@@ -71,6 +71,17 @@ class AssetLibrary:
         self.wolf_standing_texture = arcade.load_texture(self.dir / "wolf_standing.png")
         self.wolf_howling_texture = arcade.load_texture(self.dir / "wolf_howling.png")
 
+        # Dragon flap cycle. The source PNGs face right; mirror each one so
+        # the dragon faces left (matching its right-to-left flight direction).
+        dragon_forward = self._load_glob("dragon*.png", numeric_sort=True)
+        self.dragon_textures = [t.flip_left_right() for t in dragon_forward]
+
+        # Storm cloud frames — animated cloud that sits at the top of each
+        # ceiling-mounted lightning emitter while a bolt is forming.
+        self.storm_cloud_textures = self._load_glob(
+            "storm_cloud*.png", numeric_sort=True,
+        )
+
         # Flame thrower base + flame-segment animation frames (alt2..alt17).
         self.flame_thrower_base_texture = arcade.load_texture(
             self.dir / "flame_thrower_base.png", hit_box_algorithm=detailed,
@@ -92,6 +103,11 @@ class AssetLibrary:
         self.rain_sound = self._load_optional_sound("rain")
         self.thunder_sound = self._load_optional_sound("thunder")
         self.flame_ignition_sound = self._load_optional_sound("flame_ignition")
+        self.dragon_sound = self._load_optional_sound("dragon")
+        # Sharp, close thunder clap that fires with each lightning-bolt strike.
+        # Distinct from ``thunder_sound`` (the distant storm rumble fired by
+        # the weather state machine on PlayThunder).
+        self.lightning_strike_sound = self._load_optional_sound("thunder2")
 
     # ----- helpers -----
 

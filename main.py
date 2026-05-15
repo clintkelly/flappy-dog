@@ -355,6 +355,56 @@ FLAME_THROWER_BIRD_CRUISE_Y = 600
 
 # Spawn distribution. Column-pair takes whatever weight is left after the
 # others — keeps the table summing to 1.0 even when individual chances change.
+# Horizontally traveling dragon — enters from the right at higher-than-world
+# speed, crosses the screen, then exits left. Random altitude in the
+# playable band. Lethal on contact. Shares a single AnimationCycler across
+# all dragons (every dragon shows the same flap frame each frame).
+DRAGON_SPAWN_CHANCE = 0.05
+DRAGON_SCALE = 3.0                  # 64 native -> 192 rendered (~3x bird size)
+DRAGON_SPEED = 6                    # px/frame leftward (vs PIPE_SPEED=3 for the world)
+DRAGON_ANIMATION_FRAME_DURATION = 0.05  # 16 frames * 0.05 = 0.8s flap cycle
+DRAGON_Y_MIN = 180
+DRAGON_Y_MAX = WINDOW_HEIGHT - 150
+DRAGON_ROAR_VOLUME = 0.8
+# Distance past the right edge where dragons spawn. The roar plays at spawn,
+# so this leading distance gives the player ~1 second of audio warning
+# before any pixel of the dragon is on-screen (DRAGON_SPEED 6 px/frame * 60 fps).
+DRAGON_OFFSCREEN_LEAD_PX = 360
+# Score thresholds that trigger an automatic dragon flyby on top of the
+# regular random spawns. Crossed exactly once per run.
+DRAGON_AUTO_SPAWN_SCORES = (100, 200)
+
+# Ceiling lightning bolt — vertical hazard whose visible top is an
+# animated storm cloud sprite, with the bolt itself drawn as a flickering
+# jagged polyline below it. Reuses ``FlameThrowerCycle`` from
+# flame_thrower.py: dormant -> warming -> extending -> holding -> receding.
+# Hitbox is a thin invisible rectangle so collision is predictable; the
+# jagged visual is cosmetic. Only spawns during STORM weather.
+LIGHTNING_SPAWN_CHANCE = 0.10
+STORM_CLOUD_SCALE = 1.5                        # 64 native -> 96 rendered
+STORM_CLOUD_HALF_HEIGHT = 32 * STORM_CLOUD_SCALE
+STORM_CLOUD_ANIMATION_FRAME_DURATION = 0.15    # 9 frames * 0.15 = 1.35s cycle
+LIGHTNING_EMITTER_Y = WINDOW_HEIGHT - STORM_CLOUD_HALF_HEIGHT - 8   # cloud center, small top margin
+LIGHTNING_BOLT_ORIGIN_OFFSET_Y = -STORM_CLOUD_HALF_HEIGHT           # bolt starts at the cloud's bottom
+LIGHTNING_HITBOX_WIDTH = 28
+LIGHTNING_SEGMENT_HEIGHT = 96                  # one "segment" of bolt length
+LIGHTNING_MAX_SEGMENTS = 5                     # full reach ~480 px below the cloud
+LIGHTNING_DORMANT_DURATION = 2.5
+LIGHTNING_WARMING_DURATION = 0.3
+LIGHTNING_EXTENDING_DURATION = 0.18            # snappier than flame — lightning is fast
+LIGHTNING_HOLDING_DURATION = 0.6
+LIGHTNING_RECEDING_DURATION = 0.25
+LIGHTNING_NODE_SPACING = 24                    # vertical px between zigzag nodes
+LIGHTNING_JITTER_X = 14                        # max horizontal jitter per node
+LIGHTNING_FLICKER_INTERVAL = 0.05              # re-randomize jaggies every 50ms
+LIGHTNING_CORE_WIDTH = 3.0
+LIGHTNING_GLOW_WIDTH = 9.0
+LIGHTNING_CORE_COLOR = (255, 255, 255)
+LIGHTNING_GLOW_COLOR = (170, 200, 255, 130)
+LIGHTNING_WARM_SPARK_RADIUS = 6
+LIGHTNING_WARM_SPARK_COLOR = (255, 255, 200, 220)
+LIGHTNING_STRIKE_VOLUME = 1.0                  # full volume — thunder is loud and close
+
 _COLUMN_PAIR_SPAWN_WEIGHT = (
     1.0
     - WOLF_SPAWN_CHANCE
@@ -362,6 +412,8 @@ _COLUMN_PAIR_SPAWN_WEIGHT = (
     - RING_OBSTACLE_CHANCE
     - BOULDER_OBSTACLE_CHANCE
     - FLAME_THROWER_SPAWN_CHANCE
+    - LIGHTNING_SPAWN_CHANCE
+    - DRAGON_SPAWN_CHANCE
 )
 OBSTACLE_SPAWN_TABLE = SpawnTable([
     ("wolf", WOLF_SPAWN_CHANCE),
@@ -369,6 +421,8 @@ OBSTACLE_SPAWN_TABLE = SpawnTable([
     ("ring", RING_OBSTACLE_CHANCE),
     ("boulder", BOULDER_OBSTACLE_CHANCE),
     ("flame_thrower", FLAME_THROWER_SPAWN_CHANCE),
+    ("lightning", LIGHTNING_SPAWN_CHANCE),
+    ("dragon", DRAGON_SPAWN_CHANCE),
     ("column", _COLUMN_PAIR_SPAWN_WEIGHT),
 ])
 
@@ -1183,6 +1237,8 @@ class GameView(arcade.View):
         self.spiky_ball_texture = assets.spiky_ball_texture
         self.flame_thrower_base_texture = assets.flame_thrower_base_texture
         self.flame_textures = assets.flame_textures
+        self.storm_cloud_textures = assets.storm_cloud_textures
+        self.dragon_textures = assets.dragon_textures
 
         # Sounds
         self.jump_sound = assets.jump_sound
@@ -1192,6 +1248,8 @@ class GameView(arcade.View):
         self.milestone_sound = assets.milestone_sound
         self.howl_sound = assets.howl_sound
         self.flame_ignition_sound = assets.flame_ignition_sound
+        self.lightning_strike_sound = assets.lightning_strike_sound
+        self.dragon_sound = assets.dragon_sound
 
         # Static sky background sprite (rebuilt per GameView — cheap).
         self.sky_sprite = arcade.Sprite(assets.sky_texture, scale=4)
@@ -1208,6 +1266,7 @@ class GameView(arcade.View):
         # that used to live on the view for bird/ring/coin separately.
         self.bird_cycler = AnimationCycler(self.player_textures, PLAYER_ANIMATION_FRAME_DURATION)
         self.flame_cycler = AnimationCycler(self.flame_textures, FLAME_ANIMATION_FRAME_DURATION)
+        self.dragon_cycler = AnimationCycler(self.dragon_textures, DRAGON_ANIMATION_FRAME_DURATION)
         self.ring_cycler = AnimationCycler(self.ring_textures, RING_ANIMATION_FRAME_DURATION)
         self.coin_cycler = AnimationCycler(self.coin_textures, COIN_ANIMATION_FRAME_DURATION)
 
@@ -1220,6 +1279,9 @@ class GameView(arcade.View):
         self.is_game_over = False
         self.ring_combo = 0
         self.coin_combo = 0
+        # Score thresholds that still need to trigger their automatic dragon.
+        # Popped from the front as each is crossed in _award_score.
+        self.pending_dragon_score_thresholds = list(DRAGON_AUTO_SPAWN_SCORES)
 
         self.gui_camera = arcade.Camera2D()
 
@@ -1321,6 +1383,14 @@ class GameView(arcade.View):
         # segments can be added/removed each frame as the cycle progresses.
         self.scene.add_sprite_list("FlameThrowerBases")
         self.scene.add_sprite_list("Flames")
+        # Lightning-bolt emitters (invisible position-trackers) and per-bolt
+        # hitbox segments (also invisible — the visual is a code-drawn polyline
+        # rendered in draw_lightning_bolts).
+        self.scene.add_sprite_list("LightningEmitters")
+        self.scene.add_sprite_list("Lightning")
+        # Dragons fly faster than the world scroll; their own sprite list so
+        # collision + animation update are a single-pass each.
+        self.scene.add_sprite_list("Dragons")
         self.scene.add_sprite_list("Rings")
         self.scene.add_sprite_list("Coins")
         self.scene.add_sprite_list("ScoreZones")
@@ -1495,6 +1565,8 @@ class GameView(arcade.View):
         self.move_boulders(delta_time)
         self.move_orbit_obstacles(delta_time)
         self.move_flame_throwers(delta_time)
+        self.move_lightning_bolts(delta_time)
+        self.move_dragons(delta_time)
         self.move_rings(delta_time)
         self.move_coins(delta_time)
         self.update_wolves(delta_time)
@@ -1514,7 +1586,9 @@ class GameView(arcade.View):
         if (arcade.check_for_collision_with_list(self.player_sprite, self.scene["Pipes"])
                 or arcade.check_for_collision_with_list(self.player_sprite, self.scene["Boulders"])
                 or arcade.check_for_collision_with_list(self.player_sprite, self.scene["OrbitObstacles"])
-                or arcade.check_for_collision_with_list(self.player_sprite, self.scene["Flames"])):
+                or arcade.check_for_collision_with_list(self.player_sprite, self.scene["Flames"])
+                or arcade.check_for_collision_with_list(self.player_sprite, self.scene["Lightning"])
+                or arcade.check_for_collision_with_list(self.player_sprite, self.scene["Dragons"])):
             result = self.player_state.on_collision(self.player_sprite)
             if result.game_over:
                 self.game_over()
@@ -1616,7 +1690,10 @@ class GameView(arcade.View):
         # currently-oscillating center_x — motions that don't track a
         # horizontal anchor fall back to center_x.
         last_x = -float("inf")
-        for list_name in ("Pipes", "Boulders", "Rings", "OrbitObstacles", "FlameThrowerBases"):
+        for list_name in (
+            "Pipes", "Boulders", "Rings", "OrbitObstacles",
+            "FlameThrowerBases", "LightningEmitters",
+        ):
             sprites = self.scene.get_sprite_list(list_name)
             if sprites:
                 anchor = sprites[-1]
@@ -1710,6 +1787,11 @@ class GameView(arcade.View):
         # Single weighted roll picks wolf / spiky / ring / boulder / column-pair.
         # Branches stay flat instead of accumulating cumulative thresholds.
         kind = OBSTACLE_SPAWN_TABLE.pick(random.random())
+        # Lightning is a storm hazard — fall back to a column pair when the
+        # weather isn't actually stormy so the sky doesn't fork bolts on a
+        # sunny day. Keeps the obstacle cadence steady (we don't skip a slot).
+        if kind == "lightning" and self.weather.state != WeatherStateMachine.STORM:
+            kind = "column"
         if kind == "wolf":
             # Rare rescue opportunity. Clamp the wolf so it's reachable from
             # the previous obstacle's exit altitude (mirrors the wolf -> next
@@ -1746,6 +1828,16 @@ class GameView(arcade.View):
             self.spawn_flame_thrower(column_x)
             # Player has to cruise above the flame's reach.
             self.bird_expected_y = FLAME_THROWER_BIRD_CRUISE_Y
+        elif kind == "lightning":
+            # Ceiling lightning bolt — vertical hazard mirroring the flame
+            # thrower but striking downward. Player cruises low to dodge.
+            self.spawn_lightning_bolt(column_x)
+            self.bird_expected_y = 180   # below the bolt's max reach
+        elif kind == "dragon":
+            # Flying enemy that crosses right-to-left faster than the world.
+            # Doesn't reserve a lane (the next obstacle still spawns on the
+            # regular cadence), so bird_expected_y is left alone.
+            self.spawn_dragon(column_x)
         elif kind == "boulder":
             # Spawn a single oscillating boulder instead of a column pair. Constrain
             # its lowest swing so the bonus ring at the floor stays reachable.
@@ -2029,6 +2121,190 @@ class GameView(arcade.View):
                 existing.clear()
                 base.remove_from_sprite_lists()
 
+    def spawn_lightning_bolt(self, x):
+        """ Ceiling-mounted lightning bolt. The "emitter" is an invisible
+        position-tracker sprite that scrolls left with the world; the bolt
+        itself is drawn each frame in draw_lightning_bolts as a flickering
+        jagged polyline. Hitbox segments are added to the "Lightning"
+        sprite list to match the cycle's segment_count.
+
+        Also drops a score-zone trip-wire so passing under the bolt scores. """
+        emitter = arcade.SpriteSolidColor(
+            width=1, height=1, color=(0, 0, 0, 0),
+        )
+        emitter.visible = False
+        emitter.center_x = x
+        emitter.center_y = LIGHTNING_EMITTER_Y
+        emitter.cycle = FlameThrowerCycle(
+            max_segments=LIGHTNING_MAX_SEGMENTS,
+            dormant_duration=LIGHTNING_DORMANT_DURATION,
+            warming_duration=LIGHTNING_WARMING_DURATION,
+            extending_duration=LIGHTNING_EXTENDING_DURATION,
+            holding_duration=LIGHTNING_HOLDING_DURATION,
+            receding_duration=LIGHTNING_RECEDING_DURATION,
+            initial_phase=random.uniform(0, LIGHTNING_DORMANT_DURATION),
+        )
+        emitter.hitboxes = []      # list of invisible SpriteSolidColors in "Lightning"
+        emitter.flicker_timer = 0.0
+        emitter.path = []          # list of (x, y) nodes for the polyline
+        # Animated storm cloud sitting at the top of the bolt. Each emitter owns
+        # its own cycler with a random starting frame so adjacent clouds don't
+        # animate in lockstep.
+        emitter.cloud_cycler = AnimationCycler(
+            self.storm_cloud_textures, STORM_CLOUD_ANIMATION_FRAME_DURATION,
+        )
+        emitter.cloud_cycler.index = random.randrange(len(self.storm_cloud_textures))
+        emitter.cloud_sprite = arcade.Sprite(
+            emitter.cloud_cycler.current, scale=STORM_CLOUD_SCALE,
+        )
+        emitter.cloud_sprite.center_x = emitter.center_x
+        emitter.cloud_sprite.center_y = emitter.center_y
+        self.scene.add_sprite("LightningEmitters", emitter)
+
+        score_zone = arcade.SpriteSolidColor(
+            width=SCORE_ZONE_WIDTH,
+            height=WINDOW_HEIGHT,
+            color=arcade.color.RED,
+        )
+        score_zone.center_x = x + SCORE_ZONE_X_OFFSET
+        score_zone.center_y = WINDOW_HEIGHT // 2
+        score_zone.visible = False
+        score_zone.motion = LinearMotion(vx=-PIPE_SPEED)
+        self.scene.add_sprite("ScoreZones", score_zone)
+
+    def move_lightning_bolts(self, delta_time):
+        """ Scroll each emitter left, tick its cycle, play a strike sound on
+        warming->extending, reconcile its invisible hitboxes against the cycle's
+        segment_count, re-roll the visual polyline path on a flicker interval,
+        and cull when the emitter leaves the screen. """
+        for emitter in list(self.scene.get_sprite_list("LightningEmitters")):
+            emitter.center_x -= PIPE_SPEED
+            emitter.cloud_cycler.tick(delta_time)
+            emitter.cloud_sprite.texture = emitter.cloud_cycler.current
+            emitter.cloud_sprite.center_x = emitter.center_x
+            previous_state = emitter.cycle.state
+            emitter.cycle.update(delta_time)
+            if emitter.cycle.just_ignited(previous_state) and self.lightning_strike_sound:
+                arcade.play_sound(
+                    self.lightning_strike_sound, volume=LIGHTNING_STRIKE_VOLUME,
+                )
+
+            desired = emitter.cycle.segment_count
+
+            # Reconcile invisible hitboxes — each segment is a thin rectangle
+            # of LIGHTNING_HITBOX_WIDTH x LIGHTNING_SEGMENT_HEIGHT, stacked
+            # from the emitter downward.
+            while len(emitter.hitboxes) < desired:
+                hb = arcade.SpriteSolidColor(
+                    width=LIGHTNING_HITBOX_WIDTH,
+                    height=LIGHTNING_SEGMENT_HEIGHT,
+                    color=(0, 0, 0, 0),
+                )
+                hb.visible = False
+                emitter.hitboxes.append(hb)
+                self.scene.add_sprite("Lightning", hb)
+            while len(emitter.hitboxes) > desired:
+                hb = emitter.hitboxes.pop()
+                hb.remove_from_sprite_lists()
+
+            # Slide existing hitboxes to follow the emitter and stack downward.
+            for index, hb in enumerate(emitter.hitboxes):
+                hb.center_x = emitter.center_x
+                hb.center_y = (
+                    emitter.center_y
+                    - LIGHTNING_SEGMENT_HEIGHT / 2
+                    - index * LIGHTNING_SEGMENT_HEIGHT
+                )
+
+            # Flicker the visible polyline path — re-roll the jagged nodes on a
+            # fixed interval while the bolt is out so it looks alive.
+            emitter.flicker_timer += delta_time
+            if desired > 0 and (
+                not emitter.path
+                or emitter.flicker_timer >= LIGHTNING_FLICKER_INTERVAL
+            ):
+                self._regenerate_lightning_path(emitter, desired)
+                emitter.flicker_timer = 0.0
+            elif desired == 0:
+                emitter.path = []
+
+            # Recycle when fully scrolled off the left edge.
+            if emitter.right < 0:
+                for hb in emitter.hitboxes:
+                    hb.remove_from_sprite_lists()
+                emitter.hitboxes.clear()
+                emitter.remove_from_sprite_lists()
+
+    def _regenerate_lightning_path(self, emitter, segment_count):
+        """ Pick a fresh set of zigzag nodes from the emitter down to the
+        bolt's current tip. Endpoints stay fixed; intermediate nodes get a
+        random horizontal jitter so the bolt visibly flickers. """
+        total_height = segment_count * LIGHTNING_SEGMENT_HEIGHT
+        num_nodes = max(2, int(total_height / LIGHTNING_NODE_SPACING) + 1)
+        path = []
+        for i in range(num_nodes):
+            y = emitter.center_y - (i * total_height / (num_nodes - 1))
+            jitter_x = (
+                0.0
+                if i in (0, num_nodes - 1)
+                else random.uniform(-LIGHTNING_JITTER_X, LIGHTNING_JITTER_X)
+            )
+            path.append((emitter.center_x + jitter_x, y))
+        emitter.path = path
+
+    def draw_lightning_bolts(self):
+        """ Draw the ceiling bracket, the warming spark (if applicable), and
+        the bolt polyline (glow layer + bright core) for every active
+        emitter. The hitboxes themselves are invisible — this is the only
+        thing the player actually sees. """
+        for emitter in self.scene.get_sprite_list("LightningEmitters"):
+            # Animated storm cloud at the top of the bolt — replaces the
+            # earlier rectangle bracket so each strike origin reads as a
+            # roiling thunderhead.
+            arcade.draw_sprite(emitter.cloud_sprite)
+            # Warming spark — small glow at the bottom of the cloud
+            # telegraphing the upcoming strike.
+            if emitter.cycle.state == "warming":
+                arcade.draw_circle_filled(
+                    emitter.center_x,
+                    emitter.center_y - STORM_CLOUD_HALF_HEIGHT,
+                    LIGHTNING_WARM_SPARK_RADIUS,
+                    LIGHTNING_WARM_SPARK_COLOR,
+                )
+            # The bolt itself: outer glow (wide, soft blue) then bright core.
+            if emitter.cycle.segment_count > 0 and len(emitter.path) >= 2:
+                arcade.draw_line_strip(
+                    emitter.path, LIGHTNING_GLOW_COLOR, LIGHTNING_GLOW_WIDTH,
+                )
+                arcade.draw_line_strip(
+                    emitter.path, LIGHTNING_CORE_COLOR, LIGHTNING_CORE_WIDTH,
+                )
+
+    def spawn_dragon(self, x=None):
+        """ Flying enemy that approaches from the right at higher-than-world
+        speed. Spawns DRAGON_OFFSCREEN_LEAD_PX past the right edge so the
+        roar (played at spawn) leads the visible arrival by ~1 second —
+        the player hears it before they see it. The ``x`` parameter is
+        accepted for spawn-table dispatch parity but ignored: dragons
+        always spawn at their own offscreen lead position. """
+        dragon = arcade.Sprite(self.dragon_textures[0], scale=DRAGON_SCALE)
+        dragon.center_x = WINDOW_WIDTH + dragon.width / 2 + DRAGON_OFFSCREEN_LEAD_PX
+        dragon.center_y = random.randint(DRAGON_Y_MIN, DRAGON_Y_MAX)
+        self.scene.add_sprite("Dragons", dragon)
+        if self.dragon_sound is not None:
+            arcade.play_sound(self.dragon_sound, volume=DRAGON_ROAR_VOLUME)
+
+    def move_dragons(self, delta_time):
+        """ Advance the shared flap animation once, then scroll each dragon
+        left at DRAGON_SPEED. Cull when fully off the left edge. """
+        self.dragon_cycler.tick(delta_time)
+        current_texture = self.dragon_cycler.current
+        for dragon in self.scene.get_sprite_list("Dragons"):
+            dragon.center_x -= DRAGON_SPEED
+            dragon.texture = current_texture
+            if dragon.right < 0:
+                dragon.remove_from_sprite_lists()
+
     def make_ring(self, x):
         ring = arcade.Sprite(self.ring_textures[0], scale=RING_SCALE)
         ring.center_x = x
@@ -2243,14 +2519,23 @@ class GameView(arcade.View):
         ))
 
     def _award_score(self, points):
-        """ Add points, refresh the HUD, and emit a MilestoneCrossed event
-        when the new total crosses a multiple of MILESTONE_THRESHOLD. """
+        """ Add points, refresh the HUD, emit a MilestoneCrossed event when
+        the new total crosses a multiple of MILESTONE_THRESHOLD, and fire
+        any pending automatic dragon spawns whose score thresholds are now
+        reached. """
         old = self.score
         self.score += points
         self.score_text.text = f"{self.score_profile_name}  {self.score}"
         milestone = scoring.crossed_milestone(old, self.score, MILESTONE_THRESHOLD)
         if milestone is not None:
             self.events.emit(MilestoneCrossed(value=milestone))
+        # A single award can cross multiple dragon thresholds — drain the
+        # queue. (Typical scoring increments are small, but rings/wolves
+        # can pay 50+ and clear two thresholds in one award.)
+        while (self.pending_dragon_score_thresholds
+                and self.score >= self.pending_dragon_score_thresholds[0]):
+            self.pending_dragon_score_thresholds.pop(0)
+            self.spawn_dragon()
 
     def update_floating_texts(self, delta_time):
         for text in self.floating_texts[:]:
@@ -2460,6 +2745,10 @@ class GameView(arcade.View):
         # Rainbow goes in the distant sky — behind mountains and clouds.
         self.weather.draw_background()
         self.scene.draw()
+        # Code-drawn lightning bolts sit on top of the obstacle layer (the
+        # hitboxes in the "Lightning" sprite list are invisible — this is
+        # the actual visual).
+        self.draw_lightning_bolts()
         # Wolves sit on top of obstacles so the bubble glow reads cleanly.
         self.draw_wolves()
         # Weather sits in front of the game world (camera-lens style) — rain
