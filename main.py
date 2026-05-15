@@ -55,7 +55,7 @@ GRAVITY = 0.6
 FLAP_VELOCITY = 10
 # How far below the bottom edge the bird's center can dip before it counts as a
 # crash. Gives the player a chance to flap back up after a near-miss with the floor.
-BOTTOM_GRACE_PIXELS = 35
+BOTTOM_GRACE_PIXELS = 70
 
 # Game-over card layout and the cooldown before replay input is accepted.
 GAME_OVER_INPUT_DELAY = 2.0
@@ -88,7 +88,7 @@ MAX_PIPE_SPACING = 360
 # past base to a tougher peak as the score climbs to DIFFICULTY_RAMP_SCORE.
 # Higher *_AT_START = easier opening (e.g. 1.55 means gaps are 55% bigger than base).
 # Lower *_AT_MAX_DIFFICULTY = harder peak (e.g. 0.65 = tightens to 65% of base).
-DIFFICULTY_RAMP_SCORE = 200
+DIFFICULTY_RAMP_SCORE = 400
 GAP_RATIO_AT_START = 1.55
 GAP_RATIO_AT_MAX_DIFFICULTY = 0.65
 SPACING_RATIO_AT_START = 1.40
@@ -248,6 +248,34 @@ WOLF_CELEBRATION_COLOR = arcade.color.CYAN
 # delta of the wolf's altitude so the player can actually reach it.
 WOLF_REACHABLE_DELTA_Y = 200
 
+# Rainbow that fades in across the sky after a storm ends. Drawn as 7
+# concentric arc outlines centered below the visible screen — only the
+# top of the arc shows. "Sweep" animation: the start angle slides from
+# 180 (zero-width segment on the left horizon) down to 0 (full half-arc
+# on the right) over the fade-in window, so the rainbow appears to be
+# painted across the sky instead of popping in all at once.
+RAINBOW_FADE_IN_DURATION = 1.5
+RAINBOW_HOLD_DURATION = 6.0
+RAINBOW_FADE_OUT_DURATION = 2.0
+RAINBOW_TOTAL_DURATION = (
+    RAINBOW_FADE_IN_DURATION + RAINBOW_HOLD_DURATION + RAINBOW_FADE_OUT_DURATION
+)
+RAINBOW_CENTER_X = WINDOW_WIDTH // 2
+RAINBOW_CENTER_Y = -80                # below the screen — visible portion is the upper crown
+RAINBOW_OUTER_RADIUS = 580
+RAINBOW_BAND_WIDTH = 5                # thickness of each color band
+RAINBOW_BAND_GAP = 1                  # space between bands
+RAINBOW_MAX_ALPHA = 190
+RAINBOW_COLORS = (
+    (255, 35, 35),     # red (outermost)
+    (255, 140, 0),     # orange
+    (255, 230, 0),     # yellow
+    (50, 210, 60),     # green
+    (40, 110, 255),    # blue
+    (95, 0, 200),      # indigo
+    (170, 0, 230),     # violet (innermost)
+)
+
 # Trail particles — emitted by moving objects to make their motion easier to
 # read. Differ from spawn_burst particles in three ways: no velocity (each
 # particle sits where it was emitted), no gravity (no downward drift), and
@@ -363,6 +391,13 @@ RAIN_SOUND_VOLUME = 0.5
 LIGHTNING_FLASH_ALPHA = 230
 LIGHTNING_FLASH_DURATION = 0.25     # seconds for full-screen flash to fade to 0
 THUNDER_VOLUME = 0.8
+# Full-screen dim overlay during storms — slightly cool slate so it reads as
+# "weather darkening the sky" rather than just lower brightness. Smoothly
+# ramps toward STORM_DIM_MAX_ALPHA when the state machine enters ONSET/STORM
+# and toward 0 when it returns to CLEAR.
+STORM_DIM_MAX_ALPHA = 90
+STORM_DIM_RAMP_PER_SECOND = 45      # alpha units per second toward the target
+STORM_DIM_COLOR = (10, 20, 40)      # cool slate (RGB only; alpha computed dynamically)
 
 # Wind gust corridors — visible vertical columns of falling air that spawn
 # during storms. The rectangle scrolls left with the world; the lines inside
@@ -518,6 +553,66 @@ class WindGust:
             arcade.draw_line_strip(points, GUST_LINE_COLOR, GUST_LINE_THICKNESS)
 
 
+class Rainbow:
+    """ Post-storm rainbow that fades in with a left-to-right sweep, holds
+    briefly, then fades out. Inactive until ``activate()`` is called (by the
+    ``WeatherController`` on a StopRain event). Owns its own timer; ``draw``
+    is a no-op when inactive. """
+
+    def __init__(self):
+        self.timer = 0.0
+        self.active = False
+
+    def activate(self):
+        self.timer = 0.0
+        self.active = True
+
+    def update(self, delta_time):
+        if not self.active:
+            return
+        self.timer += delta_time
+        if self.timer >= RAINBOW_TOTAL_DURATION:
+            self.active = False
+
+    def draw(self):
+        if not self.active:
+            return
+
+        # Phase: fade-in (with sweep) -> hold -> fade-out.
+        if self.timer < RAINBOW_FADE_IN_DURATION:
+            t = self.timer / RAINBOW_FADE_IN_DURATION
+            alpha = int(RAINBOW_MAX_ALPHA * t)
+            sweep_progress = t
+        elif self.timer < RAINBOW_FADE_IN_DURATION + RAINBOW_HOLD_DURATION:
+            alpha = RAINBOW_MAX_ALPHA
+            sweep_progress = 1.0
+        else:
+            remaining = RAINBOW_TOTAL_DURATION - self.timer
+            alpha = int(RAINBOW_MAX_ALPHA * (remaining / RAINBOW_FADE_OUT_DURATION))
+            sweep_progress = 1.0
+
+        # start_angle slides from 180 (zero-width segment on left) down to 0
+        # (full half-arc) — draw_arc_outline goes counterclockwise from start
+        # to end so [start=0, end=180] traces the upper half.
+        start_angle = 180.0 * (1.0 - sweep_progress)
+        end_angle = 180.0
+
+        band_stride = RAINBOW_BAND_WIDTH + RAINBOW_BAND_GAP
+        for i, (r, g, b) in enumerate(RAINBOW_COLORS):
+            radius = RAINBOW_OUTER_RADIUS - i * band_stride
+            arcade.draw_arc_outline(
+                center_x=RAINBOW_CENTER_X,
+                center_y=RAINBOW_CENTER_Y,
+                width=radius * 2,
+                height=radius * 2,
+                color=(r, g, b, alpha),
+                start_angle=start_angle,
+                end_angle=end_angle,
+                border_width=RAINBOW_BAND_WIDTH,
+                num_segments=128,
+            )
+
+
 class WeatherController:
     """ Arcade-side facade over the pure-Python ``WeatherStateMachine``.
 
@@ -539,6 +634,12 @@ class WeatherController:
         # state machine just tells us when to fire a new flash.
         self.flash_alpha = 0.0
         self.flash_decay_per_second = LIGHTNING_FLASH_ALPHA / LIGHTNING_FLASH_DURATION
+        # Storm-darkening overlay — alpha lerps toward STORM_DIM_MAX_ALPHA
+        # while the state machine is in ONSET/STORM and toward 0 in CLEAR.
+        self.storm_dim_alpha = 0.0
+        # Post-storm rainbow. Activated by the StopRain event handler below;
+        # drawn by draw_background() so it sits behind mountains/clouds.
+        self.rainbow = Rainbow()
 
     @property
     def state(self):
@@ -570,7 +671,34 @@ class WeatherController:
         if self.state == WeatherStateMachine.STORM:
             self.rain.update(delta_time)
 
+        # Smoothly ramp the dim overlay toward its target alpha. CLEAR = 0,
+        # ONSET/STORM = max. The ramp gives a few seconds of gradual darkening
+        # at storm onset and gradual brightening when the storm ends.
+        target = 0.0 if self.state == WeatherStateMachine.CLEAR else float(STORM_DIM_MAX_ALPHA)
+        step = STORM_DIM_RAMP_PER_SECOND * delta_time
+        if abs(target - self.storm_dim_alpha) <= step:
+            self.storm_dim_alpha = target
+        elif target > self.storm_dim_alpha:
+            self.storm_dim_alpha += step
+        else:
+            self.storm_dim_alpha -= step
+
+        self.rainbow.update(delta_time)
+
+    def draw_background(self):
+        """ Drawn between the sky and the scene so the rainbow sits in the
+        distant sky (behind mountains and clouds). """
+        self.rainbow.draw()
+
     def draw(self):
+        # Dim overlay first so rain, gusts, and the flash sit on top of the
+        # darkened world (the flash punching through a stormy sky reads
+        # better that way).
+        if self.storm_dim_alpha > 0:
+            arcade.draw_lbwh_rectangle_filled(
+                0, 0, WINDOW_WIDTH, WINDOW_HEIGHT,
+                (*STORM_DIM_COLOR, int(self.storm_dim_alpha)),
+            )
         if self.state == WeatherStateMachine.STORM:
             self.rain.draw()
         for gust in self.gusts:
@@ -606,6 +734,7 @@ class WeatherController:
             if self.rain_player is not None:
                 arcade.stop_sound(self.rain_player)
                 self.rain_player = None
+            self.rainbow.activate()
         elif isinstance(event, StormStart):
             # Push all drops above/right so the storm visibly rolls in.
             self.rain.reset_above_screen()
@@ -1103,7 +1232,16 @@ class GameView(arcade.View):
         # deadzone — emulates LEFT/RIGHT keyboard press/release transitions.
         self._stick_left_pressed = False
         self._stick_right_pressed = False
-        self.score_text = arcade.Text(f"Score: {self.score}", x=10, y=WINDOW_HEIGHT - 20, color=arcade.color.WHITE, font_size=14)
+        store = getattr(self.window, "score_store", None)
+        self.score_profile_name = store.current_profile if store else DEFAULT_PROFILE
+        self.score_text = arcade.Text(
+            f"{self.score_profile_name}  {self.score}",
+            x=14,
+            y=WINDOW_HEIGHT - 50,
+            color=arcade.color.GOLD,
+            font_size=34,
+            bold=True,
+        )
         self.paused_text = arcade.Text(
             "PAUSED  (P or A to resume)",
             x=WINDOW_WIDTH - 10,
@@ -2109,7 +2247,7 @@ class GameView(arcade.View):
         when the new total crosses a multiple of MILESTONE_THRESHOLD. """
         old = self.score
         self.score += points
-        self.score_text.text = f"Score: {self.score}"
+        self.score_text.text = f"{self.score_profile_name}  {self.score}"
         milestone = scoring.crossed_milestone(old, self.score, MILESTONE_THRESHOLD)
         if milestone is not None:
             self.events.emit(MilestoneCrossed(value=milestone))
@@ -2319,6 +2457,8 @@ class GameView(arcade.View):
         self.clear()
         self.gui_camera.use()
         arcade.draw_sprite(self.sky_sprite)
+        # Rainbow goes in the distant sky — behind mountains and clouds.
+        self.weather.draw_background()
         self.scene.draw()
         # Wolves sit on top of obstacles so the bubble glow reads cleanly.
         self.draw_wolves()

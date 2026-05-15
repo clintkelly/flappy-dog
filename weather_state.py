@@ -23,8 +23,8 @@ import random
 # by the state machine; the visual rain / gust / flash tuning lives in main.py.
 STORM_INTERVAL_MIN = 5.0
 STORM_INTERVAL_MAX = 18.0
-STORM_DURATION_MIN = 30.0
-STORM_DURATION_MAX = 60.0
+STORM_DURATION_MIN = 18.0
+STORM_DURATION_MAX = 36.0
 STORM_ONSET_FLASH_DELAY = 0.6       # seconds from onset-flash to thunder
 STORM_ONSET_RAIN_DELAY = 1.4        # seconds from thunder to rain begin
 LIGHTNING_INTERVAL_MIN = 4.0        # seconds between in-storm lightning events
