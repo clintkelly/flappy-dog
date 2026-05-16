@@ -381,12 +381,12 @@ DRAGON_AUTO_SPAWN_SCORES = (100, 200)
 # Hitbox is a thin invisible rectangle so collision is predictable; the
 # jagged visual is cosmetic. Only spawns during STORM weather.
 LIGHTNING_SPAWN_CHANCE = 0.10
-STORM_CLOUD_SCALE = 1.5                        # 64 native -> 96 rendered
+STORM_CLOUD_SCALE = 2.5                        # 64 native -> 160 rendered (was 1.5)
 STORM_CLOUD_HALF_HEIGHT = 32 * STORM_CLOUD_SCALE
 STORM_CLOUD_ANIMATION_FRAME_DURATION = 0.15    # 9 frames * 0.15 = 1.35s cycle
 LIGHTNING_EMITTER_Y = WINDOW_HEIGHT - STORM_CLOUD_HALF_HEIGHT - 8   # cloud center, small top margin
 LIGHTNING_BOLT_ORIGIN_OFFSET_Y = -STORM_CLOUD_HALF_HEIGHT           # bolt starts at the cloud's bottom
-LIGHTNING_HITBOX_WIDTH = 28
+LIGHTNING_HITBOX_WIDTH = 40                    # slightly wider than before; still narrower than the visual glow
 LIGHTNING_SEGMENT_HEIGHT = 96                  # one "segment" of bolt length
 LIGHTNING_MAX_SEGMENTS = 5                     # full reach ~480 px below the cloud
 LIGHTNING_DORMANT_DURATION = 2.5
@@ -395,13 +395,15 @@ LIGHTNING_EXTENDING_DURATION = 0.18            # snappier than flame — lightni
 LIGHTNING_HOLDING_DURATION = 0.6
 LIGHTNING_RECEDING_DURATION = 0.25
 LIGHTNING_NODE_SPACING = 24                    # vertical px between zigzag nodes
-LIGHTNING_JITTER_X = 14                        # max horizontal jitter per node
+LIGHTNING_JITTER_X = 24                        # max horizontal jitter per node (was 14 — more dramatic zigzag)
 LIGHTNING_FLICKER_INTERVAL = 0.05              # re-randomize jaggies every 50ms
-LIGHTNING_CORE_WIDTH = 3.0
-LIGHTNING_GLOW_WIDTH = 9.0
+LIGHTNING_CORE_WIDTH = 5.0                     # thicker bright line (was 3.0)
+LIGHTNING_GLOW_WIDTH = 20.0                    # wider blue halo (was 9.0)
+LIGHTNING_OUTER_GLOW_WIDTH = 36.0              # second, softer halo for extra menace
 LIGHTNING_CORE_COLOR = (255, 255, 255)
-LIGHTNING_GLOW_COLOR = (170, 200, 255, 130)
-LIGHTNING_WARM_SPARK_RADIUS = 6
+LIGHTNING_GLOW_COLOR = (180, 210, 255, 200)    # brighter than before (alpha 130 -> 200)
+LIGHTNING_OUTER_GLOW_COLOR = (140, 170, 255, 90)
+LIGHTNING_WARM_SPARK_RADIUS = 12               # was 6 — pre-strike warning spark is bigger too
 LIGHTNING_WARM_SPARK_COLOR = (255, 255, 200, 220)
 LIGHTNING_STRIKE_VOLUME = 1.0                  # full volume — thunder is loud and close
 
@@ -839,6 +841,15 @@ class TitleView(arcade.View):
             anchor_x="center",
             anchor_y="center",
         )
+        self.profile_hint_text = arcade.Text(
+            "← → or X / Y to switch  •  N to edit",
+            x=WINDOW_WIDTH // 2,
+            y=78,
+            color=(180, 180, 180),
+            font_size=12,
+            anchor_x="center",
+            anchor_y="center",
+        )
         self.prompt_text = arcade.Text(
             "Press SPACE or A to start  •  Q or B to quit",
             x=WINDOW_WIDTH // 2,
@@ -883,8 +894,25 @@ class TitleView(arcade.View):
         self.title_text.draw()
         self.high_score_text.draw()
         self.profile_text.draw()
+        self.profile_hint_text.draw()
         self.prompt_text.draw()
         self.controls_text.draw()
+
+    def cycle_profile(self, direction):
+        """ Step through known profiles in ``direction`` (+1 or -1), wrapping
+        at the ends. Persists the new selection so the next launch
+        remembers it, then refreshes the displayed profile text. """
+        store = self.window.score_store
+        profiles = store.known_profiles()
+        if not profiles:
+            return
+        try:
+            idx = profiles.index(store.current_profile)
+        except ValueError:
+            idx = 0
+        store.current_profile = profiles[(idx + direction) % len(profiles)]
+        store.save()
+        self.profile_text.text = f"PROFILE: {store.current_profile}"
 
     def on_key_press(self, key, modifiers):
         if key == arcade.key.SPACE:
@@ -895,16 +923,23 @@ class TitleView(arcade.View):
             self.window.show_view(ProfilePickerView())
         elif key == arcade.key.H:
             self.window.show_view(HighScoreView())
+        elif key == arcade.key.LEFT:
+            self.cycle_profile(-1)
+        elif key == arcade.key.RIGHT:
+            self.cycle_profile(+1)
 
     def on_button_press(self, button):
+        # X/Y cycle profiles in place on the title screen — previously they
+        # opened the profile picker / high-scores view, which the keyboard's
+        # N / H still handle.
         if button in ("a", "start"):
             self.on_key_press(arcade.key.SPACE, 0)
         elif button in ("b", "back"):
             self.on_key_press(arcade.key.Q, 0)
         elif button == "x":
-            self.on_key_press(arcade.key.N, 0)
+            self.on_key_press(arcade.key.LEFT, 0)
         elif button == "y":
-            self.on_key_press(arcade.key.H, 0)
+            self.on_key_press(arcade.key.RIGHT, 0)
 
 
 class ProfilePickerView(arcade.View):
@@ -1246,6 +1281,8 @@ class GameView(arcade.View):
         self.coin_sound = assets.coin_sound
         self.ring_sound = assets.ring_sound
         self.milestone_sound = assets.milestone_sound
+        self.bonus_sound = assets.bonus_sound
+        self.hundred_milestone_sound = assets.hundred_milestone_sound
         self.howl_sound = assets.howl_sound
         self.flame_ignition_sound = assets.flame_ignition_sound
         self.lightning_strike_sound = assets.lightning_strike_sound
@@ -2271,8 +2308,13 @@ class GameView(arcade.View):
                     LIGHTNING_WARM_SPARK_RADIUS,
                     LIGHTNING_WARM_SPARK_COLOR,
                 )
-            # The bolt itself: outer glow (wide, soft blue) then bright core.
+            # The bolt itself: two glow layers (wide soft halo + brighter
+            # inner halo) and a bright white core line on top. Three layers
+            # is enough to read as electric without looking like a tube.
             if emitter.cycle.segment_count > 0 and len(emitter.path) >= 2:
+                arcade.draw_line_strip(
+                    emitter.path, LIGHTNING_OUTER_GLOW_COLOR, LIGHTNING_OUTER_GLOW_WIDTH,
+                )
                 arcade.draw_line_strip(
                     emitter.path, LIGHTNING_GLOW_COLOR, LIGHTNING_GLOW_WIDTH,
                 )
@@ -2284,15 +2326,24 @@ class GameView(arcade.View):
         """ Flying enemy that approaches from the right at higher-than-world
         speed. Spawns DRAGON_OFFSCREEN_LEAD_PX past the right edge so the
         roar (played at spawn) leads the visible arrival by ~1 second —
-        the player hears it before they see it. The ``x`` parameter is
-        accepted for spawn-table dispatch parity but ignored: dragons
-        always spawn at their own offscreen lead position. """
+        the player hears it before they see it.
+
+        Only one dragon is allowed in flight at a time (including the
+        offscreen-lead phase) — if there's already one alive in the
+        ``Dragons`` sprite list the call is a no-op. Returns True if the
+        dragon was actually spawned so callers can defer.
+
+        The ``x`` parameter is accepted for spawn-table dispatch parity but
+        ignored: dragons always spawn at their own offscreen lead position. """
+        if len(self.scene.get_sprite_list("Dragons")) > 0:
+            return False
         dragon = arcade.Sprite(self.dragon_textures[0], scale=DRAGON_SCALE)
         dragon.center_x = WINDOW_WIDTH + dragon.width / 2 + DRAGON_OFFSCREEN_LEAD_PX
         dragon.center_y = random.randint(DRAGON_Y_MIN, DRAGON_Y_MAX)
         self.scene.add_sprite("Dragons", dragon)
         if self.dragon_sound is not None:
             arcade.play_sound(self.dragon_sound, volume=DRAGON_ROAR_VOLUME)
+        return True
 
     def move_dragons(self, delta_time):
         """ Advance the shared flap animation once, then scroll each dragon
@@ -2478,9 +2529,19 @@ class GameView(arcade.View):
         bus.subscribe(MilestoneCrossed, lambda e: arcade.play_sound(
             self.milestone_sound, volume=MILESTONE_VOLUME,
         ))
+        # Extra fanfare layered on top at multiples of 100. Plays alongside
+        # the regular milestone sound for a bigger moment at 100, 200, ...
+        bus.subscribe(MilestoneCrossed, lambda e: (
+            arcade.play_sound(self.hundred_milestone_sound, volume=MILESTONE_VOLUME)
+            if self.hundred_milestone_sound is not None and e.value % 100 == 0
+            else None
+        ))
+        # Coin streak: prefer the dedicated bonus.wav if present, otherwise
+        # fall back to the pitched-up milestone fanfare so existing installs
+        # keep their sound.
         bus.subscribe(CoinStreakBonus, lambda e: arcade.play_sound(
-            self.milestone_sound,
-            speed=COIN_STREAK_SOUND_SPEED,
+            self.bonus_sound if self.bonus_sound is not None else self.milestone_sound,
+            speed=1.0 if self.bonus_sound is not None else COIN_STREAK_SOUND_SPEED,
             volume=COIN_STREAK_SOUND_VOLUME,
         ))
         bus.subscribe(GameOver, lambda e: arcade.play_sound(self.gameover_sound))
@@ -2529,13 +2590,16 @@ class GameView(arcade.View):
         milestone = scoring.crossed_milestone(old, self.score, MILESTONE_THRESHOLD)
         if milestone is not None:
             self.events.emit(MilestoneCrossed(value=milestone))
-        # A single award can cross multiple dragon thresholds — drain the
-        # queue. (Typical scoring increments are small, but rings/wolves
-        # can pay 50+ and clear two thresholds in one award.)
+        # Try to drain any reached dragon-milestone thresholds. Only pop a
+        # threshold if the dragon actually spawned — if there's already one
+        # in flight, leave the threshold pending and try again on the next
+        # _award_score call. (Without this, the milestone dragon at e.g. 100
+        # could be silently swallowed by an in-flight random-spawn dragon.)
         while (self.pending_dragon_score_thresholds
                 and self.score >= self.pending_dragon_score_thresholds[0]):
+            if not self.spawn_dragon():
+                break
             self.pending_dragon_score_thresholds.pop(0)
-            self.spawn_dragon()
 
     def update_floating_texts(self, delta_time):
         for text in self.floating_texts[:]:

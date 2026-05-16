@@ -104,6 +104,11 @@ class AssetLibrary:
         self.thunder_sound = self._load_optional_sound("thunder")
         self.flame_ignition_sound = self._load_optional_sound("flame_ignition")
         self.dragon_sound = self._load_optional_sound("dragon")
+        # Played for the coin-streak bonus (every 10 coins in a row).
+        self.bonus_sound = self._load_optional_sound("bonus")
+        # Played when the score crosses a multiple of 100 (on top of the
+        # regular milestone fanfare for an extra-fanfare moment).
+        self.hundred_milestone_sound = self._load_optional_sound("100")
         # Sharp, close thunder clap that fires with each lightning-bolt strike.
         # Distinct from ``thunder_sound`` (the distant storm rumble fired by
         # the weather state machine on PlayThunder).
